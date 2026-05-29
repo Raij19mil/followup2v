@@ -26,26 +26,73 @@ const S = {
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-const db = {
-  get: (k, d) => { try { return JSON.parse(localStorage.getItem(k) || "null") ?? d; } catch { return d; } },
-  set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
-};
-const aKey = (acc, k) => `acc_${acc}_${k}`;
+const API = "http://localhost:3001";
 const uid = () => Math.random().toString(36).slice(2, 9);
 const now = () => new Date().toISOString();
 const fmt = iso => { if (!iso) return "—"; try { return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }); } catch { return iso; } };
 
+// ─── API-backed store (syncs to Node.js backend) ────────────────────────────
+const accountCache = {}; // { accountId: { data, ts } }
+
+async function fetchAccount(accountId) {
+  try {
+    const res = await fetch(`${API}/api/account/${accountId}`);
+    if (!res.ok) throw new Error(res.status);
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function saveKey(accountId, key, value) {
+  try {
+    await fetch(`${API}/api/account/${accountId}/${key}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(value),
+    });
+  } catch (e) {
+    console.warn("[API] save failed:", e.message);
+  }
+}
+
 function useStore(accountId, key, def) {
-  const k = aKey(accountId, key);
-  const [state, setState] = useState(() => db.get(k, def));
+  const [state, setState] = useState(def);
   const ref = useRef(state);
   ref.current = state;
+
+  // Load from backend on mount and when accountId/key changes
+  useEffect(() => {
+    let cancelled = false;
+    fetchAccount(accountId).then(data => {
+      if (cancelled || !data) return;
+      setState(data[key] ?? def);
+    });
+    return () => { cancelled = true; };
+  }, [accountId, key]);
+
+  // Poll every 8 seconds to catch incoming webhooks
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchAccount(accountId).then(data => {
+        if (!data) return;
+        setState(prev => {
+          const next = data[key] ?? def;
+          // Only update if the data actually changed (avoid re-renders)
+          return JSON.stringify(next) !== JSON.stringify(prev) ? next : prev;
+        });
+      });
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [accountId, key]);
+
   const set = useCallback((v) => {
     const next = typeof v === "function" ? v(ref.current) : v;
     setState(next);
-    db.set(k, next);
-  }, [k]);
-  useEffect(() => { setState(db.get(k, def)); }, [k]);
+    ref.current = next;
+    saveKey(accountId, key, next);
+  }, [accountId, key]);
+
   return [state, set];
 }
 
@@ -258,15 +305,25 @@ function Clients({ accountId }) {
                   <div>
                     <div style={{ fontSize:14, fontWeight:500, color:O.black }}>{c.name}</div>
                     <div style={{ fontSize:12, color:O.gray500, marginTop:2 }}>{[c.phone,c.email].filter(Boolean).join(" · ")}</div>
-                    {(c.tags||[]).length > 0 && (
-                      <div style={{ display:"flex", gap:4, marginTop:4 }}>
-                        {c.tags.map(t => <span key={t} style={{ ...S.tag, background:O.orangePale, color:O.orange, fontSize:10 }}>{t}</span>)}
-                      </div>
-                    )}
+                    <div style={{ display:"flex", gap:6, marginTop:4, flexWrap:"wrap", alignItems:"center" }}>
+                      {(c.tags||[]).map(t => <span key={t} style={{ ...S.tag, background:O.orangePale, color:O.orange, fontSize:10 }}>{t}</span>)}
+                      {c.messagesReceived > 0 && (
+                        <span style={{ ...S.tag, background:O.bluePale, color:O.blue, fontSize:10 }}>📨 {c.messagesReceived} msg{c.messagesReceived > 1 ? "s" : ""} recebida{c.messagesReceived > 1 ? "s" : ""}</span>
+                      )}
+                      {c.lastWebhookAt && (
+                        <span style={{ fontSize:10, color:O.gray400 }}>Último webhook: {fmt(c.lastWebhookAt)}</span>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                   <span style={{ ...S.tag, background:O.gray50, color:O.gray400, fontSize:10 }}>{c.source||"manual"}</span>
+                  {c.chatwootUrl && (
+                    <a href={c.chatwootUrl} target="_blank" rel="noreferrer"
+                       style={{ ...S.btnGhost, textDecoration:"none", fontSize:12, padding:"6px 12px", color:"#2563EB", borderColor:"#BFDBFE", background:"#EFF6FF" }}>
+                      ◉ Abrir no Chatwoot
+                    </a>
+                  )}
                   <button style={S.btnGhost} onClick={()=>openEdit(c)}>Editar</button>
                   <button style={{ ...S.btnGhost, color:O.red, borderColor:"#FECACA" }} onClick={()=>remove(c.id)}>✕</button>
                 </div>
@@ -523,7 +580,7 @@ function Webhooks({ accountId }) {
   const blank = { name:"", description:"", autoSchedule:false, defaultMessageId:"", scheduleDays:1, active:true };
   const [form, setForm] = useState(blank);
 
-  const baseUrl = `${window.location.origin}/api/webhook`;
+  const baseUrl = `${API}/api/webhook`;
 
   function save() {
     if (!form.name.trim()) return;
@@ -665,7 +722,11 @@ function Webhooks({ accountId }) {
 
 // ─── Chatwoot API helper ──────────────────────────────────────────────────────
 async function cwReq(apiUrl, apiToken, path, method="GET", body=null) {
-  const url = `${apiUrl.replace(/\/$/, "")}${path}`;
+  let formattedUrl = apiUrl.replace(/\/$/, "");
+  if (!formattedUrl.startsWith("http://") && !formattedUrl.startsWith("https://")) {
+    formattedUrl = "https://" + formattedUrl;
+  }
+  const url = `${formattedUrl}${path}`;
   const opts = { method, headers: { "api_access_token": apiToken, "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(url, opts);
