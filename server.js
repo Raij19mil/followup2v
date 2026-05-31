@@ -8,11 +8,35 @@ const { Pool } = require("pg");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Verificação básica de configuração
+if (!process.env.DATABASE_URL) {
+  console.error("✗ ERRO CRÍTICO: Variável de ambiente DATABASE_URL não definida.");
+}
+
 // ─── Supabase/PostgreSQL Connection ──────────────────────────────────────────
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Necessário para conexões externas como Supabase/Vercel
+  ssl: { rejectUnauthorized: false }
 });
+
+// Log de evento para monitorar a conexão do Pool
+pool.on('error', (err) => {
+  console.error('✗ Erro inesperado no Pool do Supabase:', err.message);
+});
+
+pool.on('connect', () => {
+  console.log('✓ Nova conexão estabelecida com o banco de dados');
+});
+
+// Teste de conexão imediato
+pool.query('SELECT NOW()', (err) => {
+  if (err) {
+    console.error('✗ Falha na conexão inicial com Supabase:', err.message);
+  } else {
+    console.log('✓ Conexão com Supabase verificada com sucesso');
+  }
+});
+
 
 // ─── Database Initialization ─────────────────────────────────────────────────
 // Cria a tabela automaticamente se não existir

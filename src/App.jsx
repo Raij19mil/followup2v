@@ -26,7 +26,11 @@ const S = {
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-const API = "http://localhost:3001";
+// Em desenvolvimento (Vite), usa a porta 3001. Em produção, usa caminhos relativos.
+const API = import.meta.env.DEV 
+  ? "http://localhost:3001" 
+  : window.location.origin;
+
 const uid = () => Math.random().toString(36).slice(2, 9);
 const now = () => new Date().toISOString();
 const fmt = iso => { if (!iso) return "—"; try { return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }); } catch { return iso; } };
