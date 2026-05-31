@@ -1,78 +1,84 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
 const path = require("path");
+const mongoose = require("mongoose");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const DB_PATH = path.join(__dirname, "database.json");
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/followup_platform";
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 
-// ─── DB Helpers ───────────────────────────────────────────────────────────────
-function readDB() {
-  try {
-    return JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
-  } catch {
-    return { accounts: {} };
-  }
-}
+// ─── MongoDB Connection ───────────────────────────────────────────────────────
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log("✓ Connected to MongoDB"))
+  .catch((err) => console.error("✗ MongoDB connection error:", err));
 
-function writeDB(data) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-}
+// ─── Schema & Model ───────────────────────────────────────────────────────────
+const AccountSchema = new mongoose.Schema({
+  accountId: { type: String, unique: true, required: true },
+  integrations: { type: Object, default: {} },
+  clients: { type: Array, default: [] },
+  messages: { type: Array, default: [] },
+  schedules: { type: Array, default: [] },
+  webhooks: { type: Array, default: [] },
+  webhookLogs: { type: Array, default: [] },
+});
 
-function getAccount(db, accountId) {
-  if (!db.accounts[accountId]) {
-    db.accounts[accountId] = {
-      integrations: {},
-      clients: [],
-      messages: [],
-      schedules: [],
-      webhooks: [],
-      webhookLogs: [],
-    };
+const Account = mongoose.model("Account", AccountSchema);
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+async function getOrCreateAccount(accountId) {
+  let acc = await Account.findOne({ accountId });
+  if (!acc) {
+    acc = new Account({ accountId });
+    await acc.save();
   }
-  return db.accounts[accountId];
+  return acc;
 }
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const now = () => new Date().toISOString();
 
 // ─── GET: Full account data ────────────────────────────────────────────────────
-app.get("/api/account/:accountId", (req, res) => {
-  const db = readDB();
-  const acc = getAccount(db, req.params.accountId);
-  res.json(acc);
+app.get("/api/account/:accountId", async (req, res) => {
+  try {
+    const acc = await getOrCreateAccount(req.params.accountId);
+    res.json(acc);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── PUT: Save a specific key (clients, messages, schedules, etc.) ─────────────
-app.put("/api/account/:accountId/:key", (req, res) => {
-  const db = readDB();
-  const acc = getAccount(db, req.params.accountId);
-  const { key, accountId } = req.params;
-  const allowed = ["clients", "messages", "schedules", "webhooks", "webhookLogs", "integrations"];
-  if (!allowed.includes(key)) return res.status(400).json({ error: "Invalid key" });
-  acc[key] = req.body;
-  writeDB(db);
-  res.json({ ok: true });
+app.put("/api/account/:accountId/:key", async (req, res) => {
+  try {
+    const { key, accountId } = req.params;
+    const allowed = ["clients", "messages", "schedules", "webhooks", "webhookLogs", "integrations"];
+    if (!allowed.includes(key)) return res.status(400).json({ error: "Invalid key" });
+    
+    await Account.findOneAndUpdate({ accountId }, { [key]: req.body }, { upsert: true });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── POST: Chatwoot Webhook Endpoint ──────────────────────────────────────────
 // The Chatwoot macro sends a POST to: /api/webhook/:accountId/:token
-app.post("/api/webhook/:accountId/:token", (req, res) => {
+app.post("/api/webhook/:accountId/:token", async (req, res) => {
   const { accountId, token } = req.params;
   const payload = req.body;
 
-  const db = readDB();
-  const acc = getAccount(db, accountId);
+  const acc = await getOrCreateAccount(accountId);
 
   // 1. Find the webhook config by token
   const wh = acc.webhooks.find((w) => w.token === token && w.active);
   if (!wh) {
-    console.log(`[WEBHOOK] Token not found or inactive: ${token}`);
+    console.log(`[WEBHOOK] Token not found or inactive for account ${accountId}: ${token}`);
     return res.status(404).json({ error: "Webhook not found or inactive" });
   }
 
@@ -173,7 +179,11 @@ app.post("/api/webhook/:accountId/:token", (req, res) => {
   // Keep only last 100 logs
   acc.webhookLogs = acc.webhookLogs.slice(0, 100);
 
-  writeDB(db);
+  await pool.query(
+    `UPDATE accounts SET clients = $1, schedules = $2, webhook_logs = $3 WHERE account_id = $4`,
+    [JSON.stringify(acc.clients), JSON.stringify(acc.schedules), JSON.stringify(acc.webhookLogs), accountId]
+  );
+  
   console.log(`[WEBHOOK] ${wh.name} → ${action}`);
   res.json({ ok: true, action });
 });

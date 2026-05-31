@@ -1,6 +1,17 @@
-node_modules
-dist
-.DS_Store
-*.local
+# Variáveis de Ambiente
 .env
-.env.local
+
+# Dependências
+node_modules/
+
+# Build e Produção
+dist/
+build/
+
+# Logs e Banco de Dados Local
+*.log
+database.json
+
+# Arquivos de Sistema
+.DS_Store
+Thumbs.db
