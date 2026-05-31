@@ -1,43 +1,57 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs");
 const path = require("path");
-const mongoose = require("mongoose");
+const { Pool } = require("pg");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/followup_platform";
+
+// ─── Supabase/PostgreSQL Connection ──────────────────────────────────────────
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false } // Necessário para conexões externas como Supabase/Vercel
+});
+
+// ─── Database Initialization ─────────────────────────────────────────────────
+// Cria a tabela automaticamente se não existir
+async function initDb() {
+  const createTableQuery = `
+    CREATE TABLE IF NOT EXISTS accounts (
+      account_id TEXT PRIMARY KEY,
+      integrations JSONB DEFAULT '{}',
+      clients JSONB DEFAULT '[]',
+      messages JSONB DEFAULT '[]',
+      schedules JSONB DEFAULT '[]',
+      webhooks JSONB DEFAULT '[]',
+      webhook_logs JSONB DEFAULT '[]'
+    );
+  `;
+  try {
+    await pool.query(createTableQuery);
+    console.log("✓ Database tables initialized in Supabase");
+  } catch (err) {
+    console.error("✗ Database init error:", err);
+  }
+}
+initDb();
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 
-// ─── MongoDB Connection ───────────────────────────────────────────────────────
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log("✓ Connected to MongoDB"))
-  .catch((err) => console.error("✗ MongoDB connection error:", err));
-
-// ─── Schema & Model ───────────────────────────────────────────────────────────
-const AccountSchema = new mongoose.Schema({
-  accountId: { type: String, unique: true, required: true },
-  integrations: { type: Object, default: {} },
-  clients: { type: Array, default: [] },
-  messages: { type: Array, default: [] },
-  schedules: { type: Array, default: [] },
-  webhooks: { type: Array, default: [] },
-  webhookLogs: { type: Array, default: [] },
-});
-
-const Account = mongoose.model("Account", AccountSchema);
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 async function getOrCreateAccount(accountId) {
-  let acc = await Account.findOne({ accountId });
-  if (!acc) {
-    acc = new Account({ accountId });
-    await acc.save();
+  const res = await pool.query("SELECT * FROM accounts WHERE account_id = $1", [accountId]);
+  if (res.rows.length === 0) {
+    const newAcc = await pool.query(
+      "INSERT INTO accounts (account_id) VALUES ($1) RETURNING *",
+      [accountId]
+    );
+    return newAcc.rows[0];
   }
-  return acc;
+  return res.rows[0];
 }
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -46,8 +60,13 @@ const now = () => new Date().toISOString();
 // ─── GET: Full account data ────────────────────────────────────────────────────
 app.get("/api/account/:accountId", async (req, res) => {
   try {
-    const acc = await getOrCreateAccount(req.params.accountId);
-    res.json(acc);
+    const rawAcc = await getOrCreateAccount(req.params.accountId);
+    // Mapeia nomes do banco para o frontend (snake_case para camelCase)
+    res.json({
+      ...rawAcc,
+      accountId: rawAcc.account_id,
+      webhookLogs: rawAcc.webhook_logs
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -57,10 +76,15 @@ app.get("/api/account/:accountId", async (req, res) => {
 app.put("/api/account/:accountId/:key", async (req, res) => {
   try {
     const { key, accountId } = req.params;
+    const dbKey = key === "webhookLogs" ? "webhook_logs" : key;
     const allowed = ["clients", "messages", "schedules", "webhooks", "webhookLogs", "integrations"];
     if (!allowed.includes(key)) return res.status(400).json({ error: "Invalid key" });
     
-    await Account.findOneAndUpdate({ accountId }, { [key]: req.body }, { upsert: true });
+    await pool.query(
+      `INSERT INTO accounts (account_id, ${dbKey}) VALUES ($1, $2) 
+       ON CONFLICT (account_id) DO UPDATE SET ${dbKey} = $2`,
+      [accountId, JSON.stringify(req.body)]
+    );
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -73,10 +97,11 @@ app.post("/api/webhook/:accountId/:token", async (req, res) => {
   const { accountId, token } = req.params;
   const payload = req.body;
 
-  const acc = await getOrCreateAccount(accountId);
+  const rawAcc = await getOrCreateAccount(accountId);
+  const acc = { ...rawAcc, webhookLogs: rawAcc.webhook_logs };
 
   // 1. Find the webhook config by token
-  const wh = acc.webhooks.find((w) => w.token === token && w.active);
+  const wh = (acc.webhooks || []).find((w) => w.token === token && w.active);
   if (!wh) {
     console.log(`[WEBHOOK] Token not found or inactive for account ${accountId}: ${token}`);
     return res.status(404).json({ error: "Webhook not found or inactive" });
