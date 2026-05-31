@@ -105,8 +105,8 @@ app.put("/api/account/:accountId/:key", async (req, res) => {
     if (!allowed.includes(key)) return res.status(400).json({ error: "Invalid key" });
     
     await pool.query(
-      `INSERT INTO accounts (account_id, ${dbKey}) VALUES ($1, $2) 
-       ON CONFLICT (account_id) DO UPDATE SET ${dbKey} = $2`,
+      `INSERT INTO accounts (account_id, "${dbKey}") VALUES ($1, $2) 
+       ON CONFLICT (account_id) DO UPDATE SET "${dbKey}" = $2`,
       [accountId, JSON.stringify(req.body)]
     );
     res.json({ ok: true });
@@ -250,3 +250,5 @@ app.listen(PORT, () => {
   console.log(`✓ FollowUp backend running on http://localhost:${PORT}`);
   console.log(`  Webhook URL format: http://localhost:${PORT}/api/webhook/:accountId/:token`);
 });
+
+module.exports = app;
