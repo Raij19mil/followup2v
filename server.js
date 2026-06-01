@@ -243,7 +243,9 @@ const distPath = path.join(__dirname, "dist");
 
 // No Vercel, o roteamento estático é feito pelo vercel.json, não pelo Express.
 // Mantemos este bloco apenas para funcionamento local (npm start)
-if (!process.env.VERCEL) {
+const isVercel = process.env.VERCEL === '1' || !!process.env.NOW_REGION;
+
+if (!isVercel) {
   app.use(express.static(distPath));
 
   // Rota catch-all para garantir que o SPA (React) lide com o roteamento
