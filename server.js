@@ -49,7 +49,8 @@ async function initDb() {
       messages JSONB DEFAULT '[]',
       schedules JSONB DEFAULT '[]',
       webhooks JSONB DEFAULT '[]',
-      webhook_logs JSONB DEFAULT '[]'
+      webhook_logs JSONB DEFAULT '[]',
+      settings JSONB DEFAULT '{}'
     );
   `;
   try {
@@ -101,7 +102,7 @@ app.put("/api/account/:accountId/:key", async (req, res) => {
   try {
     const { key, accountId } = req.params;
     const dbKey = key === "webhookLogs" ? "webhook_logs" : key;
-    const allowed = ["clients", "messages", "schedules", "webhooks", "webhookLogs", "integrations"];
+    const allowed = ["clients", "messages", "schedules", "webhooks", "webhookLogs", "integrations", "settings"];
     if (!allowed.includes(key)) return res.status(400).json({ error: "Invalid key" });
     
     await pool.query(
@@ -239,12 +240,18 @@ app.post("/api/webhook/:accountId/:token", async (req, res) => {
 
 // ─── Serve built frontend in production ───────────────────────────────────────
 const distPath = path.join(__dirname, "dist");
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(distPath, "index.html"));
-  });
-}
+
+app.use(express.static(distPath));
+
+// Rota catch-all para garantir que o SPA (React) lide com o roteamento
+app.get("*", (req, res) => {
+  const indexPath = path.join(distPath, "index.html");
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).send("Erro: Pasta 'dist' não encontrada. Você executou 'npm run build'?");
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`✓ FollowUp backend running on http://localhost:${PORT}`);
