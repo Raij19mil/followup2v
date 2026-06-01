@@ -41,21 +41,26 @@ pool.query('SELECT NOW()', (err) => {
 // ─── Database Initialization ─────────────────────────────────────────────────
 // Cria a tabela automaticamente se não existir
 async function initDb() {
-  const createTableQuery = `
-    CREATE TABLE IF NOT EXISTS accounts (
-      account_id TEXT PRIMARY KEY,
-      integrations JSONB DEFAULT '{}',
-      clients JSONB DEFAULT '[]',
-      messages JSONB DEFAULT '[]',
-      schedules JSONB DEFAULT '[]',
-      webhooks JSONB DEFAULT '[]',
-      webhook_logs JSONB DEFAULT '[]',
-      settings JSONB DEFAULT '{}'
-    );
-  `;
   try {
-    await pool.query(createTableQuery);
-    console.log("✓ Database tables initialized in Supabase");
+    // 1. Cria a tabela base
+    await pool.query(`CREATE TABLE IF NOT EXISTS accounts (account_id TEXT PRIMARY KEY)`);
+
+    // 2. Garante que todas as colunas JSONB existam (adiciona apenas se faltarem)
+    const columns = [
+      { name: "integrations", def: "'{}'" },
+      { name: "clients", def: "'[]'" },
+      { name: "messages", def: "'[]'" },
+      { name: "schedules", def: "'[]'" },
+      { name: "webhooks", def: "'[]'" },
+      { name: "webhook_logs", def: "'[]'" },
+      { name: "settings", def: "'{}'" }
+    ];
+
+    for (const col of columns) {
+      await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "${col.name}" JSONB DEFAULT ${col.def}`);
+    }
+
+    console.log("✓ Database schema verified/updated in Supabase");
   } catch (err) {
     console.error("✗ Database init error:", err);
   }
@@ -93,7 +98,8 @@ app.get("/api/account/:accountId", async (req, res) => {
       webhookLogs: rawAcc.webhook_logs
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[API GET ERROR]:", err);
+    res.status(500).json({ error: err.message, detail: err.stack });
   }
 });
 
@@ -112,7 +118,8 @@ app.put("/api/account/:accountId/:key", async (req, res) => {
     );
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[API PUT ERROR]:", err);
+    res.status(500).json({ error: err.message, detail: err.stack });
   }
 });
 
