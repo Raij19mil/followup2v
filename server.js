@@ -16,11 +16,14 @@ if (!process.env.DATABASE_URL) {
 // ─── Supabase/PostgreSQL Connection ──────────────────────────────────────────
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  connectionTimeoutMillis: 5000, // 5 segundos de timeout
+  idleTimeoutMillis: 30000,
+  max: 10 // Limite de conexões para não estourar o plano do Supabase
 });
 
 // Log de evento para monitorar a conexão do Pool
-pool.on('error', (err) => {
+pool.on('error', (err, client) => {
   console.error('✗ Erro inesperado no Pool do Supabase:', err.message);
 });
 
@@ -73,14 +76,13 @@ app.use(express.json());
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 async function getOrCreateAccount(accountId) {
-  const res = await pool.query("SELECT * FROM accounts WHERE account_id = $1", [accountId]);
-  if (res.rows.length === 0) {
-    const newAcc = await pool.query(
-      "INSERT INTO accounts (account_id) VALUES ($1) RETURNING *",
-      [accountId]
-    );
-    return newAcc.rows[0];
-  }
+  // Usamos ON CONFLICT para evitar erros de concorrência (Race Condition)
+  const res = await pool.query(
+    `INSERT INTO accounts (account_id) VALUES ($1) 
+     ON CONFLICT (account_id) DO UPDATE SET account_id = EXCLUDED.account_id 
+     RETURNING *`,
+    [accountId]
+  );
   return res.rows[0];
 }
 
