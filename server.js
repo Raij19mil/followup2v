@@ -241,17 +241,21 @@ app.post("/api/webhook/:accountId/:token", async (req, res) => {
 // ─── Serve built frontend in production ───────────────────────────────────────
 const distPath = path.join(__dirname, "dist");
 
-app.use(express.static(distPath));
+// No Vercel, o roteamento estático é feito pelo vercel.json, não pelo Express.
+// Mantemos este bloco apenas para funcionamento local (npm start)
+if (!process.env.VERCEL) {
+  app.use(express.static(distPath));
 
-// Rota catch-all para garantir que o SPA (React) lide com o roteamento
-app.get("*", (req, res) => {
-  const indexPath = path.join(distPath, "index.html");
-  if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    res.status(404).send("Erro: Pasta 'dist' não encontrada. Você executou 'npm run build'?");
-  }
-});
+  // Rota catch-all para garantir que o SPA (React) lide com o roteamento
+  app.get("*", (req, res) => {
+    const indexPath = path.join(distPath, "index.html");
+    if (fs.existsSync(indexPath)) {
+      res.sendFile(indexPath);
+    } else {
+      res.status(404).send("Erro: Pasta 'dist' não encontrada. Você executou 'npm run build'?");
+    }
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`✓ FollowUp backend running on http://localhost:${PORT}`);
