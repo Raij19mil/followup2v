@@ -380,10 +380,9 @@ function Messages({ accountId }) {
   async function load() {
     try {
       const rows = await apiFetch(accountId, "/messages");
-      // Mapeamento caso a API retorne algo diferente
       setMessages(rows.map(r => ({
         id: r.id,
-        name: r.conteudo.substring(0, 20) + "...", // Novo server.js não tem 'nome' na mensagem, então improvisamos para exibição
+        name: r.nome || r.conteudo.substring(0, 20) + "...",
         content: r.conteudo,
         channel: r.canal,
         type: "text",
@@ -393,15 +392,33 @@ function Messages({ accountId }) {
   }
 
   function openNew()  { setForm(blank); setEditId(null); setShow(true); }
-  function openEdit(m){ setForm(m); setEditId(m.id); setShow(true); }
+  function openEdit(m){ setForm({ ...m, content: m.content || "" }); setEditId(m.id); setShow(true); }
 
-  function save() {
-    alert("Função de criar mensagem ainda não implementada no novo backend.");
-    setShow(false);
+  async function save() {
+    if (!form.content.trim()) return;
+    const payload = {
+      nome: form.name,
+      conteudo: form.content,
+      canal: form.channel
+    };
+    try {
+      if (editId) {
+        await apiFetch(accountId, `/messages/${editId}`, "PUT", payload);
+      } else {
+        await apiFetch(accountId, "/messages", "POST", payload);
+      }
+      setShow(false);
+      load();
+    } catch(e) { alert("Erro ao salvar mensagem: " + e.message); }
   }
 
-  function remove(id) { 
-    alert("Função de remover mensagem ainda não implementada no novo backend.");
+  async function remove(id) { 
+    if (confirm("Remover este template de mensagem?")) {
+      try {
+        await apiFetch(accountId, `/messages/${id}`, "DELETE");
+        load();
+      } catch(e) { alert("Erro ao remover mensagem: " + e.message); }
+    }
   }
 
   const preview = (txt) => txt

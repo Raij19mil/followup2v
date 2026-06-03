@@ -114,6 +114,43 @@ app.get('/api/:conta/messages', async (req, res) => {
   }
 })
 
+app.post('/api/:conta/messages', async (req, res) => {
+  try {
+    const { nome, conteudo, canal = 'whatsapp' } = req.body
+    const { rows } = await pool.query(
+      `INSERT INTO mensagens (id, conta_slug, nome, conteudo, canal)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [createId(), req.params.conta, nome, conteudo, canal]
+    )
+    res.status(201).json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.put('/api/:conta/messages/:id', async (req, res) => {
+  try {
+    const { nome, conteudo, canal } = req.body
+    const { rows } = await pool.query(
+      `UPDATE mensagens SET nome=$1, conteudo=$2, canal=$3
+       WHERE id=$4 AND conta_slug=$5 RETURNING *`,
+      [nome, conteudo, canal, req.params.id, req.params.conta]
+    )
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/:conta/messages/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM mensagens WHERE id=$1 AND conta_slug=$2', [req.params.id, req.params.conta])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ─── WEBHOOKS CONFIG ──────────────────────────────────────────────────────────
 
 app.get('/api/:conta/webhooks', async (req, res) => {
