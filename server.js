@@ -1,276 +1,292 @@
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const { Pool } = require("pg");
+import express from 'express'
+import cors from 'cors'
+import { Pool } from 'pg'
+import dotenv from 'dotenv'
+import { createId } from '@paralleldrive/cuid2'
 
-const app = express();
-const PORT = process.env.PORT || 3001;
+dotenv.config()
 
-// Verificação básica de configuração
-if (!process.env.DATABASE_URL) {
-  console.error("✗ ERRO CRÍTICO: Variável de ambiente DATABASE_URL não definida.");
-}
+const app = express()
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
 
-// ─── Supabase/PostgreSQL Connection ──────────────────────────────────────────
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  connectionTimeoutMillis: 5000, // 5 segundos de timeout
-  idleTimeoutMillis: 30000,
-  max: 10 // Limite de conexões para não estourar o plano do Supabase
-});
+app.use(cors())
+app.use(express.json())
 
-// Log de evento para monitorar a conexão do Pool
-pool.on('error', (err, client) => {
-  console.error('✗ Erro inesperado no Pool do Supabase:', err.message);
-});
+// ─── CLIENTES ────────────────────────────────────────────────────────────────
 
-pool.on('connect', () => {
-  console.log('✓ Nova conexão estabelecida com o banco de dados');
-});
-
-// Teste de conexão imediato
-pool.query('SELECT NOW()', (err) => {
-  if (err) {
-    console.error('✗ Falha na conexão inicial com Supabase:', err.message);
-  } else {
-    console.log('✓ Conexão com Supabase verificada com sucesso');
-  }
-});
-
-
-// ─── Database Initialization ─────────────────────────────────────────────────
-// Cria a tabela automaticamente se não existir
-async function initDb() {
+app.get('/api/:conta/clients', async (req, res) => {
   try {
-    // 1. Cria a tabela base
-    await pool.query(`CREATE TABLE IF NOT EXISTS accounts (account_id TEXT PRIMARY KEY)`);
+    const { rows } = await pool.query(
+      'SELECT * FROM clientes WHERE conta_slug = $1 ORDER BY criado_em DESC',
+      [req.params.conta]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
 
-    // 2. Garante que todas as colunas JSONB existam (adiciona apenas se faltarem)
-    const columns = [
-      { name: "integrations", def: "'{}'" },
-      { name: "clients", def: "'[]'" },
-      { name: "messages", def: "'[]'" },
-      { name: "schedules", def: "'[]'" },
-      { name: "webhooks", def: "'[]'" },
-      { name: "webhook_logs", def: "'[]'" },
-      { name: "settings", def: "'{}'" }
-    ];
+app.post('/api/:conta/clients', async (req, res) => {
+  try {
+    const { nome, phone, email, source = 'manual', tags = [], notes } = req.body
+    const { rows } = await pool.query(
+      `INSERT INTO clientes (id, conta_slug, nome, phone, email, source, tags, notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [createId(), req.params.conta, nome, phone, email, source, tags, notes]
+    )
+    res.status(201).json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
 
-    for (const col of columns) {
-      await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "${col.name}" JSONB DEFAULT ${col.def}`);
+app.put('/api/:conta/clients/:id', async (req, res) => {
+  try {
+    const { nome, phone, email, tags, notes } = req.body
+    const { rows } = await pool.query(
+      `UPDATE clientes SET nome=$1, phone=$2, email=$3, tags=$4, notes=$5
+       WHERE id=$6 AND conta_slug=$7 RETURNING *`,
+      [nome, phone, email, tags, notes, req.params.id, req.params.conta]
+    )
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/:conta/clients/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM clientes WHERE id=$1 AND conta_slug=$2', [req.params.id, req.params.conta])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── AGENDAMENTOS ─────────────────────────────────────────────────────────────
+
+app.get('/api/:conta/schedules', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM agendamentos WHERE conta_slug=$1 ORDER BY agendado_para ASC',
+      [req.params.conta]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/:conta/schedules', async (req, res) => {
+  try {
+    const { cliente_id, mensagem, canal = 'whatsapp', agendado_para } = req.body
+    const { rows } = await pool.query(
+      `INSERT INTO agendamentos (id, conta_slug, cliente_id, mensagem, canal, agendado_para)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [createId(), req.params.conta, cliente_id, mensagem, canal, agendado_para]
+    )
+    res.status(201).json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/:conta/schedules/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM agendamentos WHERE id=$1 AND conta_slug=$2', [req.params.id, req.params.conta])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── MENSAGENS ────────────────────────────────────────────────────────────────
+
+app.get('/api/:conta/messages', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM mensagens WHERE conta_slug=$1 ORDER BY criado_em DESC',
+      [req.params.conta]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── WEBHOOKS CONFIG ──────────────────────────────────────────────────────────
+
+app.get('/api/:conta/webhooks', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM webhooks WHERE conta_slug=$1 ORDER BY criado_em DESC',
+      [req.params.conta]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/:conta/webhooks', async (req, res) => {
+  try {
+    const { nome, descricao, auto_schedule, schedule_days } = req.body
+    const token = Math.random().toString(36).substring(2, 16)
+    const { rows } = await pool.query(
+      `INSERT INTO webhooks (id, conta_slug, nome, descricao, token, auto_schedule, schedule_days)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [createId(), req.params.conta, nome, descricao, token, auto_schedule, schedule_days]
+    )
+    res.status(201).json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── WEBHOOK LOGS ─────────────────────────────────────────────────────────────
+
+app.get('/api/:conta/webhooks/logs', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM webhook_logs WHERE conta_slug=$1 ORDER BY received_at DESC LIMIT 50',
+      [req.params.conta]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── RECEBER WEBHOOK EXTERNO (Chatwoot / Evolution API) ───────────────────────
+
+app.post('/webhook/:conta/:token', async (req, res) => {
+  try {
+    const { conta, token } = req.params
+    const payload = req.body
+
+    // Verificar se o webhook existe e está ativo
+    const { rows: wh } = await pool.query(
+      'SELECT * FROM webhooks WHERE conta_slug=$1 AND token=$2 AND active=true',
+      [conta, token]
+    )
+    if (!wh.length) return res.status(404).json({ error: 'Webhook não encontrado' })
+
+    const webhook = wh[0]
+    let action = 'Evento recebido'
+    let clienteId = null
+
+    // Processar evento contact_created do Chatwoot
+    if (payload.event === 'contact_created' || payload.event === 'conversation_created') {
+      const contact = payload.contact || {}
+      const nome = contact.name || 'Sem nome'
+      const phone = contact.phone_number || contact.phone || ''
+      const email = contact.email || ''
+      const chatwootId = contact.id || null
+      const conversationId = payload.conversationId || payload.conversation?.id || null
+
+      // Verificar se cliente já existe pelo telefone
+      const { rows: existing } = await pool.query(
+        'SELECT * FROM clientes WHERE conta_slug=$1 AND phone=$2',
+        [conta, phone]
+      )
+
+      if (existing.length) {
+        // Atualizar cliente existente
+        await pool.query(
+          `UPDATE clientes SET messages_received = messages_received + 1, last_webhook_at=NOW()
+           WHERE id=$1`,
+          [existing[0].id]
+        )
+        clienteId = existing[0].id
+        action = `Cliente existente atualizado (${existing[0].messages_received + 1} mensagens recebidas)`
+      } else {
+        // Criar novo cliente
+        const newId = createId()
+        await pool.query(
+          `INSERT INTO clientes (id, conta_slug, nome, phone, email, source, tags, notes, chatwoot_id, chatwoot_conversation_id, last_webhook_at)
+           VALUES ($1,$2,$3,$4,$5,'webhook','{webhook}',$6,$7,$8,NOW())`,
+          [newId, conta, nome, phone, email, `Cadastrado automaticamente via webhook`, chatwootId, conversationId]
+        )
+        clienteId = newId
+        action = 'Novo cliente cadastrado via webhook'
+      }
     }
 
-    console.log("✓ Database schema verified/updated in Supabase");
-  } catch (err) {
-    console.error("✗ Database init error:", err);
-  }
-}
-initDb();
-
-// ─── Middleware ───────────────────────────────────────────────────────────────
-app.use(cors());
-app.use(express.json());
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-async function getOrCreateAccount(accountId) {
-  // Usamos ON CONFLICT para evitar erros de concorrência (Race Condition)
-  const res = await pool.query(
-    `INSERT INTO accounts (account_id) VALUES ($1) 
-     ON CONFLICT (account_id) DO UPDATE SET account_id = EXCLUDED.account_id 
-     RETURNING *`,
-    [accountId]
-  );
-  return res.rows[0];
-}
-
-const uid = () => Math.random().toString(36).slice(2, 9);
-const now = () => new Date().toISOString();
-
-// ─── GET: Full account data ────────────────────────────────────────────────────
-app.get("/api/account/:accountId", async (req, res) => {
-  try {
-    const rawAcc = await getOrCreateAccount(req.params.accountId);
-    // Mapeia nomes do banco para o frontend (snake_case para camelCase)
-    res.json({
-      ...rawAcc,
-      accountId: rawAcc.account_id,
-      webhookLogs: rawAcc.webhook_logs
-    });
-  } catch (err) {
-    console.error("[API GET ERROR]:", err);
-    res.status(500).json({ error: err.message, detail: err.stack });
-  }
-});
-
-// ─── PUT: Save a specific key (clients, messages, schedules, etc.) ─────────────
-app.put("/api/account/:accountId/:key", async (req, res) => {
-  try {
-    const { key, accountId } = req.params;
-    const dbKey = key === "webhookLogs" ? "webhook_logs" : key;
-    const allowed = ["clients", "messages", "schedules", "webhooks", "webhookLogs", "integrations", "settings"];
-    if (!allowed.includes(key)) return res.status(400).json({ error: "Invalid key" });
-    
+    // Salvar log
     await pool.query(
-      `INSERT INTO accounts (account_id, "${dbKey}") VALUES ($1, $2) 
-       ON CONFLICT (account_id) DO UPDATE SET "${dbKey}" = $2`,
-      [accountId, JSON.stringify(req.body)]
-    );
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("[API PUT ERROR]:", err);
-    res.status(500).json({ error: err.message, detail: err.stack });
+      `INSERT INTO webhook_logs (id, conta_slug, webhook_id, webhook_name, payload, status, action)
+       VALUES ($1,$2,$3,$4,$5,'processed',$6)`,
+      [createId(), conta, webhook.id, webhook.nome, JSON.stringify(payload), action]
+    )
+
+    res.json({ ok: true, action, clienteId })
+  } catch (e) {
+    console.error('Webhook error:', e)
+    res.status(500).json({ error: e.message })
   }
-});
+})
 
-// ─── POST: Chatwoot Webhook Endpoint ──────────────────────────────────────────
-// The Chatwoot macro sends a POST to: /api/webhook/:accountId/:token
-app.post("/api/webhook/:accountId/:token", async (req, res) => {
-  const { accountId, token } = req.params;
-  const payload = req.body;
+// ─── INTEGRAÇÕES ──────────────────────────────────────────────────────────────
 
-  const rawAcc = await getOrCreateAccount(accountId);
-  const acc = { ...rawAcc, webhookLogs: rawAcc.webhook_logs };
-
-  // 1. Find the webhook config by token
-  const wh = (acc.webhooks || []).find((w) => w.token === token && w.active);
-  if (!wh) {
-    console.log(`[WEBHOOK] Token not found or inactive for account ${accountId}: ${token}`);
-    return res.status(404).json({ error: "Webhook not found or inactive" });
+app.get('/api/:conta/integrations', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM integracoes WHERE conta_slug=$1',
+      [req.params.conta]
+    )
+    res.json(rows[0] || {})
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
+})
 
-  // 2. Extract contact data from Chatwoot payload
-  // Chatwoot sends contact data in different structures depending on the event type
-  const contact = payload.contact || payload.meta?.sender || {};
-  const conversation = payload.conversation || {};
-  const account = payload.account || {};
-
-  const name = contact.name || "Sem nome";
-  const phone = contact.phone_number || contact.phone || "";
-  const email = contact.email || "";
-  const chatwootContactId = contact.id || null;
-  const chatwootConversationId = conversation.id || payload.id || null;
-
-  // Build Chatwoot conversation URL for the "Open in Chatwoot" button
-  const integration = acc.integrations?.chatwoot || {};
-  const chatwootBaseUrl = integration.apiUrl || "";
-  const chatwootAccountId = integration.cwAccountId || account.id || "";
-  const chatwootUrl = chatwootConversationId && chatwootBaseUrl && chatwootAccountId
-    ? `${chatwootBaseUrl.replace(/\/$/, "")}/app/accounts/${chatwootAccountId}/conversations/${chatwootConversationId}`
-    : null;
-
-  // 3. Check if client already exists (by phone or chatwootId)
-  const existingIdx = acc.clients.findIndex(
-    (c) => (phone && c.phone === phone) || (chatwootContactId && c.chatwootId === chatwootContactId)
-  );
-
-  let clientId;
-  let action;
-
-  if (existingIdx >= 0) {
-    // Update existing client: increment message counter
-    acc.clients[existingIdx].messagesReceived = (acc.clients[existingIdx].messagesReceived || 0) + 1;
-    acc.clients[existingIdx].lastWebhookAt = now();
-    if (chatwootUrl && !acc.clients[existingIdx].chatwootUrl) {
-      acc.clients[existingIdx].chatwootUrl = chatwootUrl;
-    }
-    if (chatwootConversationId) {
-      acc.clients[existingIdx].chatwootConversationId = chatwootConversationId;
-    }
-    clientId = acc.clients[existingIdx].id;
-    action = `Cliente existente atualizado (${acc.clients[existingIdx].messagesReceived} mensagens recebidas)`;
-  } else {
-    // New client
-    const newClient = {
-      id: uid(),
-      name,
-      phone,
-      email,
-      source: "chatwoot",
-      tags: ["chatwoot", "webhook"],
-      notes: `Cadastrado via webhook em ${now()}`,
-      chatwootId: chatwootContactId,
-      chatwootConversationId,
-      chatwootUrl,
-      messagesReceived: 1,
-      lastWebhookAt: now(),
-      createdAt: now(),
-    };
-    acc.clients.push(newClient);
-    clientId = newClient.id;
-    action = "Novo cliente cadastrado via webhook";
+app.put('/api/:conta/integrations', async (req, res) => {
+  try {
+    const { chatwoot_url, chatwoot_token, evolution_url, evolution_key } = req.body
+    const { rows } = await pool.query(
+      `INSERT INTO integracoes (conta_slug, chatwoot_url, chatwoot_token, evolution_url, evolution_key)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (conta_slug) DO UPDATE
+       SET chatwoot_url=$2, chatwoot_token=$3, evolution_url=$4, evolution_key=$5, atualizado_em=NOW()
+       RETURNING *`,
+      [req.params.conta, chatwoot_url, chatwoot_token, evolution_url, evolution_key]
+    )
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
+})
 
-  // 4. Auto-schedule follow-up if configured
-  if (wh.autoSchedule && wh.defaultMessageId && existingIdx < 0) {
-    const msg = acc.messages.find((m) => m.id === wh.defaultMessageId);
-    const dt = new Date();
-    dt.setDate(dt.getDate() + (Number(wh.scheduleDays) || 1));
+// ─── PROXY CHATWOOT (evita CORS no browser) ───────────────────────────────────
 
-    const client = acc.clients.find((c) => c.id === clientId);
-    acc.schedules.push({
-      id: uid(),
-      clientId,
-      clientName: client?.name || name,
-      messageId: wh.defaultMessageId,
-      messageName: msg?.name || "?",
-      scheduledAt: dt.toISOString(),
-      status: "pending",
-      repeat: "none",
-      notes: `Agendado automaticamente via webhook "${wh.name}"`,
-      createdAt: now(),
-    });
-    action += " + follow-up agendado";
+app.get('/api/:conta/chatwoot/contacts', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT chatwoot_url, chatwoot_token FROM integracoes WHERE conta_slug=$1',
+      [req.params.conta]
+    )
+    const integ = rows[0]
+    if (!integ?.chatwoot_url) return res.status(400).json({ error: 'Chatwoot não configurado' })
+
+    const q = req.query.q || ''
+    const response = await fetch(
+      `${integ.chatwoot_url}/api/v1/accounts/1/contacts/search?q=${encodeURIComponent(q)}&page=1`,
+      { headers: { api_access_token: integ.chatwoot_token } }
+    )
+    const data = await response.json()
+    res.json(data)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
+})
 
-  // 5. Log the event
-  acc.webhookLogs.unshift({
-    id: uid(),
-    webhookId: wh.id,
-    webhookName: wh.name,
-    receivedAt: now(),
-    payload: { event: payload.event, contact: { name, phone, email }, conversationId: chatwootConversationId },
-    status: "processed",
-    action,
-  });
-  // Keep only last 100 logs
-  acc.webhookLogs = acc.webhookLogs.slice(0, 100);
+// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 
-  await pool.query(
-    `UPDATE accounts SET clients = $1, schedules = $2, webhook_logs = $3 WHERE account_id = $4`,
-    [JSON.stringify(acc.clients), JSON.stringify(acc.schedules), JSON.stringify(acc.webhookLogs), accountId]
-  );
-  
-  console.log(`[WEBHOOK] ${wh.name} → ${action}`);
-  res.json({ ok: true, action });
-});
+app.get('/api/health', (_, res) => res.json({ ok: true, ts: new Date().toISOString() }))
 
-// ─── Serve built frontend in production ───────────────────────────────────────
-const distPath = path.join(__dirname, "dist");
+// ─── START ────────────────────────────────────────────────────────────────────
 
-// No Vercel, o roteamento estático é feito pelo vercel.json, não pelo Express.
-// Mantemos este bloco apenas para funcionamento local (npm start)
-const isVercel = process.env.VERCEL === '1' || !!process.env.NOW_REGION;
+const PORT = process.env.PORT || 3001
+app.listen(PORT, () => console.log(`Server running on :${PORT}`))
 
-if (!isVercel) {
-  app.use(express.static(distPath));
-
-  // Rota catch-all para garantir que o SPA (React) lide com o roteamento
-  app.get("*", (req, res) => {
-    const indexPath = path.join(distPath, "index.html");
-    if (fs.existsSync(indexPath)) {
-      res.sendFile(indexPath);
-    } else {
-      res.status(404).send("Erro: Pasta 'dist' não encontrada. Você executou 'npm run build'?");
-    }
-  });
-}
-
-app.listen(PORT, () => {
-  console.log(`✓ FollowUp backend running on http://localhost:${PORT}`);
-  console.log(`  Webhook URL format: http://localhost:${PORT}/api/webhook/:accountId/:token`);
-});
-
-module.exports = app;
+export default app
