@@ -331,30 +331,33 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
     // ou embrulhado. Vamos tentar buscar em todos os lugares comuns.
     const conversation = payload.conversation || payload
     const contact = conversation.meta?.sender || conversation.contact || payload.contact || payload.sender || {}
+    const customAttr = contact.custom_attributes || {}
     
     const nome = contact.name || 'Sem nome'
-    const phone = contact.phone_number || contact.phone || ''
-    const email = contact.email || ''
+    const phone = contact.phone_number || contact.phone || customAttr.phone_number || customAttr.telefone || customAttr.phone || ''
+    const email = contact.email || customAttr.email || ''
     const chatwootId = contact.id || null
     const conversationId = conversation.id || payload.conversation_id || null
 
-    if (!phone && !email) {
-      // Salvar log mesmo sem dados de contato
+    if (!phone && !email && !conversationId) {
+      // Salvar log mesmo sem dados de contato/conversa
       await pool.query(
         `INSERT INTO webhook_logs (id, conta_slug, webhook_id, webhook_name, payload, status, action)
          VALUES ($1,$2,$3,$4,$5,'error',$6)`,
-        [createId(), conta, webhook.id, webhook.nome, JSON.stringify(payload), 'Contato sem telefone/email']
+        [createId(), conta, webhook.id, webhook.nome, JSON.stringify(payload), 'Sem telefone, email ou conversation_id']
       )
-      return res.status(400).json({ error: 'Contato sem telefone ou email' })
+      return res.status(400).json({ error: 'Faltam dados de identificação (telefone/email/conversation_id)' })
     }
 
     // Criar ou atualizar cliente
-    const searchField = phone ? 'phone' : 'email'
-    const searchValue = phone || email
-    const { rows: existing } = await pool.query(
-      `SELECT * FROM clientes WHERE conta_slug=$1 AND ${searchField}=$2`,
-      [conta, searchValue]
-    )
+    let existing = []
+    if (phone) {
+      existing = (await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND phone=$2', [conta, phone])).rows
+    } else if (email) {
+      existing = (await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND email=$2', [conta, email])).rows
+    } else if (conversationId) {
+      existing = (await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND chatwoot_conversation_id=$2', [conta, conversationId])).rows
+    }
 
     if (existing.length) {
       clienteId = existing[0].id
@@ -364,7 +367,7 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
          WHERE id=$1`,
         [clienteId, conversationId]
       )
-      action = `Cliente existente atualizado via macro`
+      action = 'Cliente existente atualizado via macro'
     } else {
       clienteId = createId()
       await pool.query(
