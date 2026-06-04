@@ -327,8 +327,11 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
     const agendamentosCriados = []
 
     // Extrair dados do contato da conversa (payload de macro Chatwoot)
-    const conversation = payload.conversation || {}
-    const contact = conversation.contact || conversation.meta?.sender || payload.contact || {}
+    // O payload de macro do Chatwoot pode vir diretamente como o objeto da conversa,
+    // ou embrulhado. Vamos tentar buscar em todos os lugares comuns.
+    const conversation = payload.conversation || payload
+    const contact = conversation.meta?.sender || conversation.contact || payload.contact || payload.sender || {}
+    
     const nome = contact.name || 'Sem nome'
     const phone = contact.phone_number || contact.phone || ''
     const email = contact.email || ''
