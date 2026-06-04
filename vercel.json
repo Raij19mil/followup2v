@@ -14,6 +14,7 @@
   "rewrites": [
     { "source": "/api/(.*)", "destination": "server.js" },
     { "source": "/webhook/(.*)", "destination": "server.js" },
-    { "source": "/((?!api/|webhook/).*)", "destination": "/index.html" }
+    { "source": "/webhook-macro/(.*)", "destination": "server.js" },
+    { "source": "/((?!api/|webhook/|webhook-macro/).*)", "destination": "/index.html" }
   ]
 }

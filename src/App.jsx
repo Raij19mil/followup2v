@@ -643,34 +643,51 @@ function Schedules({ accountId }) {
 function Webhooks({ accountId }) {
   const [webhooks, setWebhooks] = useState([]);
   const [logs, setLogs]         = useState([]);
+  const [messages, setMessages] = useState([]);
   const [show, setShow] = useState(false);
-  const blank = { name:"", description:"", autoSchedule:false, scheduleDays:1 };
+  const blank = { name:"", description:"", autoSchedule:false, scheduleDays:1, tipo:"evento", msgLinks: [] };
   const [form, setForm] = useState(blank);
 
   const baseUrl = `${API}/webhook`;
+  const macroUrl = `${API}/webhook-macro`;
 
   useEffect(() => { load(); }, [accountId]);
 
   async function load() {
     try {
-      const [wh, lg] = await Promise.all([
+      const [wh, lg, msgs] = await Promise.all([
         apiFetch(accountId, "/webhooks").catch(()=>[]),
-        apiFetch(accountId, "/webhooks/logs").catch(()=>[])
+        apiFetch(accountId, "/webhooks/logs").catch(()=>[]),
+        apiFetch(accountId, "/messages").catch(()=>[])
       ]);
       setWebhooks(wh);
       setLogs(lg);
+      setMessages(msgs.map(m => ({ ...m, name: m.nome || m.conteudo.substring(0, 20) + "..." })));
     } catch(e) { console.error(e); }
   }
 
   async function save() {
     if (!form.name.trim()) return;
     try {
-      await apiFetch(accountId, "/webhooks", "POST", {
+      const whRes = await apiFetch(accountId, "/webhooks", "POST", {
         nome: form.name,
         descricao: form.description,
         auto_schedule: form.autoSchedule,
-        schedule_days: form.scheduleDays
+        schedule_days: form.scheduleDays,
+        tipo: form.tipo
       });
+      
+      if (form.tipo === "macro" && form.msgLinks.length > 0) {
+        for (const link of form.msgLinks) {
+          if (link.msgId) {
+            await apiFetch(accountId, `/webhooks/${whRes.id}/messages`, "POST", {
+              mensagem_id: link.msgId,
+              dias_offset: link.dias
+            });
+          }
+        }
+      }
+
       setShow(false);
       load();
     } catch(e) { alert("Erro: " + e.message); }
@@ -700,6 +717,7 @@ function Webhooks({ accountId }) {
                     <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
                       <span style={{ fontSize:15, fontWeight:600, color:O.black }}>{wh.nome}</span>
                       <span style={{ ...S.tag, background: wh.active ? O.greenPale : O.gray100, color: wh.active ? "#166534" : O.gray500 }}>{wh.active ? "Ativo" : "Inativo"}</span>
+                      {wh.tipo === 'macro' && <span style={{ ...S.tag, background: "#DBEAFE", color: "#1D4ED8" }}>Macro</span>}
                     </div>
                     {wh.descricao && <div style={{ fontSize:13, color:O.gray500, marginBottom:8 }}>{wh.descricao}</div>}
                     <div style={{ fontSize:12, color:O.gray500, marginBottom:4 }}>URL para configurar no Chatwoot/WhatTicket:</div>
@@ -735,28 +753,66 @@ function Webhooks({ accountId }) {
 
       {show && (
         <Modal title="Criar webhook" onClose={()=>setShow(false)}>
+          <Field label="Tipo de Webhook">
+            <select style={S.input} value={form.tipo} onChange={e=>setForm(f=>({...f,tipo:e.target.value}))}>
+              <option value="evento">Evento Padrão (contact_created)</option>
+              <option value="macro">Macro do Chatwoot (macro_executed)</option>
+            </select>
+          </Field>
           <Field label="Nome do webhook *">
-            <input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Ex: Chatwoot — Novos contatos" />
+            <input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder={form.tipo === 'macro' ? "Ex: Macro - Boas vindas" : "Ex: Chatwoot — Novos contatos"} />
           </Field>
           <Field label="Descrição">
             <input style={S.input} value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Para que serve este webhook?" />
           </Field>
-          <div style={{ padding:14, background:O.orangePale, borderRadius:10, marginBottom:14 }}>
-            <label style={{ display:"flex", alignItems:"center", gap:10, cursor:"pointer" }}>
-              <input type="checkbox" checked={form.autoSchedule} onChange={e=>setForm(f=>({...f,autoSchedule:e.target.checked}))} />
-              <div>
-                <div style={{ fontSize:13, fontWeight:500, color:O.black }}>Criar agendamento automático</div>
-                <div style={{ fontSize:12, color:O.gray700 }}>Quando o cliente chegar, agenda follow-up automaticamente</div>
-              </div>
-            </label>
-          </div>
-          {form.autoSchedule && (
-            <>
-              <Field label="Agendar após quantos dias?">
-                <input type="number" min={0} style={{ ...S.input, width:100 }} value={form.scheduleDays} onChange={e=>setForm(f=>({...f,scheduleDays:parseInt(e.target.value)||1}))} />
-              </Field>
-            </>
+          
+          {form.tipo === 'evento' && (
+            <div style={{ padding:14, background:O.orangePale, borderRadius:10, marginBottom:14 }}>
+              <label style={{ display:"flex", alignItems:"center", gap:10, cursor:"pointer" }}>
+                <input type="checkbox" checked={form.autoSchedule} onChange={e=>setForm(f=>({...f,autoSchedule:e.target.checked}))} />
+                <div>
+                  <div style={{ fontSize:13, fontWeight:500, color:O.black }}>Criar agendamento automático</div>
+                  <div style={{ fontSize:12, color:O.gray700 }}>Quando o cliente chegar, agenda follow-up automaticamente</div>
+                </div>
+              </label>
+            </div>
           )}
+          {form.tipo === 'evento' && form.autoSchedule && (
+            <Field label="Agendar após quantos dias?">
+              <input type="number" min={0} style={{ ...S.input, width:100 }} value={form.scheduleDays} onChange={e=>setForm(f=>({...f,scheduleDays:parseInt(e.target.value)||1}))} />
+            </Field>
+          )}
+
+          {form.tipo === 'macro' && (
+            <div style={{ padding:14, background:O.bluePale, borderRadius:10, marginBottom:14 }}>
+              <h4 style={{ fontSize: 13, margin: "0 0 10px", color: O.black }}>Mensagens a enviar (Agendamento Automático)</h4>
+              {form.msgLinks.map((link, idx) => (
+                <div key={idx} style={{ display:"flex", gap:10, marginBottom:10, alignItems:"center" }}>
+                  <select style={{ ...S.input, flex:1 }} value={link.msgId} onChange={e=>{
+                    const arr = [...form.msgLinks];
+                    arr[idx].msgId = e.target.value;
+                    setForm(f=>({...f,msgLinks:arr}));
+                  }}>
+                    <option value="">Selecione uma mensagem...</option>
+                    {messages.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+                  </select>
+                  <span style={{ fontSize:12, color:O.gray700 }}>após</span>
+                  <input type="number" min={0} style={{ ...S.input, width:60 }} value={link.dias} onChange={e=>{
+                    const arr = [...form.msgLinks];
+                    arr[idx].dias = parseInt(e.target.value)||0;
+                    setForm(f=>({...f,msgLinks:arr}));
+                  }} />
+                  <span style={{ fontSize:12, color:O.gray700 }}>dias</span>
+                  <button style={{ ...S.btnGhost, color:O.red, borderColor:"#FECACA", padding:"6px 10px" }} onClick={()=>{
+                    const arr = form.msgLinks.filter((_,i)=>i!==idx);
+                    setForm(f=>({...f,msgLinks:arr}));
+                  }}>✕</button>
+                </div>
+              ))}
+              <button style={{ ...S.btnGhost, fontSize: 11 }} onClick={()=>setForm(f=>({...f,msgLinks:[...f.msgLinks, {msgId:"", dias:1}]}))}>+ Adicionar mensagem</button>
+            </div>
+          )}
+
           <Actions onCancel={()=>setShow(false)} onSave={save} saveLabel="Criar webhook" />
         </Modal>
       )}
@@ -791,6 +847,7 @@ function Integrations({ accountId }) {
     const payload = {
       chatwoot_url: key === 'chatwoot' ? data.apiUrl : integrations.chatwoot_url,
       chatwoot_token: key === 'chatwoot' ? data.apiToken : integrations.chatwoot_token,
+      chatwoot_account_id: key === 'chatwoot' ? data.accountId : integrations.chatwoot_account_id,
       evolution_url: key === 'evolution' ? data.apiUrl : integrations.evolution_url,
       evolution_key: key === 'evolution' ? data.apiToken : integrations.evolution_key
     };
@@ -814,7 +871,7 @@ function Integrations({ accountId }) {
           <button key={id} onClick={()=>setActive(id)} style={{ padding:"10px 20px", border:"none", background:"transparent", cursor:"pointer", fontSize:14, fontFamily:"inherit", fontWeight: active===id ? 600 : 400, color: active===id ? O.orange : O.gray500, borderBottom: active===id ? `2px solid ${O.orange}` : "2px solid transparent", marginBottom:-1 }}>{l}</button>
         ))}
       </div>
-      {active === "chatwoot" && <ChatwootConfig cfg={{ apiUrl: integrations.chatwoot_url, apiToken: integrations.chatwoot_token }} onChange={d=>update("chatwoot",d)} accountId={accountId} />}
+      {active === "chatwoot" && <ChatwootConfig cfg={{ apiUrl: integrations.chatwoot_url, apiToken: integrations.chatwoot_token, accountId: integrations.chatwoot_account_id || "1" }} onChange={d=>update("chatwoot",d)} accountId={accountId} />}
     </div>
   );
 }
@@ -833,6 +890,7 @@ function ChatwootConfig({ cfg, onChange, accountId: followupAccountId }) {
           <h3 style={{ fontSize:15, fontWeight:600, color:O.black, margin:"0 0 16px" }}>Credenciais</h3>
           <Field label="URL do Chatwoot"><input style={S.input} value={form.apiUrl||""} onChange={e=>setForm(f=>({...f,apiUrl:e.target.value.replace(/\/$/,"")}))} placeholder="https://app.chatwoot.com" /></Field>
           <Field label="User Access Token"><input type="password" style={S.input} value={form.apiToken||""} onChange={e=>setForm(f=>({...f,apiToken:e.target.value}))} placeholder="Token de acesso do usuário" /></Field>
+          <Field label="Account ID"><input type="text" style={S.input} value={form.accountId||""} onChange={e=>setForm(f=>({...f,accountId:e.target.value}))} placeholder="1" /></Field>
           <button style={S.btn} onClick={() => onChange(form)}>Salvar credenciais</button>
         </div>
       </div>
