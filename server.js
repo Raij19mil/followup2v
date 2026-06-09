@@ -238,6 +238,21 @@ app.get('/api/:conta/webhooks/logs', async (req, res) => {
   }
 })
 
+// ─── DEBUG: Inspecionar payload bruto do Chatwoot ─────────────────────────────
+// Use esta URL temporariamente no Chatwoot para ver o payload antes de configurar:
+// POST /webhook-debug/:conta
+
+app.post('/webhook-debug/:conta', (req, res) => {
+  const payload = req.body
+  console.log(`[DEBUG] Payload recebido para conta=${req.params.conta}:`)
+  console.log(JSON.stringify(payload, null, 2))
+  res.json({
+    ok: true,
+    message: 'Payload capturado — verifique os logs do servidor',
+    received: payload
+  })
+})
+
 // ─── RECEBER WEBHOOK EXTERNO (Chatwoot / Evolution API) ───────────────────────
 
 app.post('/webhook/:conta/:token', async (req, res) => {
@@ -328,16 +343,31 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
 
     // Extrair dados do contato da conversa (payload de macro Chatwoot)
     // O payload de macro do Chatwoot pode vir diretamente como o objeto da conversa,
-    // ou embrulhado. Vamos tentar buscar em todos os lugares comuns.
+    // ou embrulhado. Tentamos todos os lugares conhecidos do schema do Chatwoot.
     const conversation = payload.conversation || payload
-    const contact = conversation.meta?.sender || conversation.contact || payload.contact || payload.sender || {}
+    const contact = conversation.meta?.sender
+      || conversation.contact
+      || payload.contact
+      || payload.sender
+      || {}
     const customAttr = contact.custom_attributes || {}
+    const inbox = conversation.inbox_id || payload.inbox_id || null
     
-    const nome = contact.name || 'Sem nome'
-    const phone = contact.phone_number || contact.phone || customAttr.phone_number || customAttr.telefone || customAttr.phone || ''
-    const email = contact.email || customAttr.email || ''
-    const chatwootId = contact.id || null
-    const conversationId = conversation.id || payload.conversation_id || null
+    const nome = contact.name || contact.display_name || payload.sender?.name || 'Sem nome'
+    const phone = (
+      contact.phone_number ||
+      contact.phone ||
+      customAttr.phone_number ||
+      customAttr.telefone ||
+      customAttr.phone ||
+      payload.meta?.sender?.phone_number ||
+      ''
+    )
+    const email = contact.email || customAttr.email || payload.meta?.sender?.email || ''
+    const chatwootId = contact.id || payload.sender?.id || null
+    const conversationId = conversation.id || payload.conversation_id || payload.id || null
+
+    console.log(`[MACRO] conta=${conta} nome=${nome} phone=${phone} email=${email} convId=${conversationId}`)
 
     if (!phone && !email && !conversationId) {
       // Salvar log mesmo sem dados de contato/conversa
@@ -388,22 +418,31 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
       [webhook.id, conta]
     )
 
-    // Buscar dados do cliente para substituir variáveis
+    if (links.length === 0) {
+      console.warn(`[MACRO] Nenhuma mensagem vinculada ao webhook ${webhook.id} (${webhook.nome}). Configure mensagens na aba Webhooks.`)
+    }
+
+    // Buscar dados atualizados do cliente para substituir variáveis
     const { rows: cliRows } = await pool.query('SELECT * FROM clientes WHERE id=$1', [clienteId])
-    const cli = cliRows[0] || {}
+    const cli = cliRows[0] || { nome, phone, email }
 
     // Criar agendamentos para cada mensagem vinculada
     for (const link of links) {
       const dataEnvio = new Date()
       dataEnvio.setDate(dataEnvio.getDate() + link.dias_offset)
 
-      // Substituir variáveis na mensagem
+      const dataStr = dataEnvio.toLocaleDateString('pt-BR')
+      const horaStr = dataEnvio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+
+      // Substituir variáveis na mensagem (inclui {{conta}} e {{conversation_id}})
       let conteudo = link.conteudo
-        .replace(/\{\{nome\}\}/g, cli.nome || '')
-        .replace(/\{\{telefone\}\}/g, cli.phone || '')
-        .replace(/\{\{email\}\}/g, cli.email || '')
-        .replace(/\{\{data\}\}/g, dataEnvio.toLocaleDateString('pt-BR'))
-        .replace(/\{\{hora\}\}/g, dataEnvio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }))
+        .replace(/\{\{nome\}\}/g, cli.nome || nome || '')
+        .replace(/\{\{telefone\}\}/g, cli.phone || phone || '')
+        .replace(/\{\{email\}\}/g, cli.email || email || '')
+        .replace(/\{\{data\}\}/g, dataStr)
+        .replace(/\{\{hora\}\}/g, horaStr)
+        .replace(/\{\{conta\}\}/g, conta)
+        .replace(/\{\{conversation_id\}\}/g, String(conversationId || ''))
 
       const agId = createId()
       await pool.query(
@@ -412,6 +451,7 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
         [agId, conta, clienteId, conteudo, link.canal, dataEnvio.toISOString()]
       )
       agendamentosCriados.push({ id: agId, dias_offset: link.dias_offset, msg: link.msg_nome })
+      console.log(`[MACRO] Agendamento criado: ${agId} para ${cli.nome} em ${dataStr} ${horaStr}`)
     }
 
     action += ` | ${agendamentosCriados.length} agendamento(s) criado(s)`

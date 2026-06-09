@@ -366,7 +366,7 @@ function Clients({ accountId }) {
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
-const VARS = ["{{nome}}","{{telefone}}","{{email}}","{{data}}","{{hora}}"];
+const VARS = ["{{nome}}","{{telefone}}","{{email}}","{{data}}","{{hora}}","{{conta}}","{{conversation_id}}"];
 
 function Messages({ accountId }) {
   const [messages, setMessages] = useState([]);
@@ -426,7 +426,9 @@ function Messages({ accountId }) {
     .replaceAll("{{telefone}}", "11 99999-9999")
     .replaceAll("{{email}}", "joao@email.com")
     .replaceAll("{{data}}", new Date().toLocaleDateString("pt-BR"))
-    .replaceAll("{{hora}}", "10:00");
+    .replaceAll("{{hora}}", "10:00")
+    .replaceAll("{{conta}}", "minha-conta")
+    .replaceAll("{{conversation_id}}", "12345");
 
   return (
     <div>
@@ -556,8 +558,8 @@ function Schedules({ accountId }) {
       if (!editId) {
         await apiFetch(accountId, "/schedules", "POST", {
           cliente_id: form.clientId,
-          mensagem: msg ? msg.conteudo : "Mensagem",
-          canal: "whatsapp",
+          mensagem: msg ? (msg.conteudo || msg.content || "Mensagem") : "Mensagem",
+          canal: msg?.canal || "whatsapp",
           agendado_para: form.scheduledAt
         });
       }
@@ -626,7 +628,7 @@ function Schedules({ accountId }) {
           <Field label="Mensagem / Template *">
             <select style={S.input} value={form.messageId} onChange={e=>setForm(f=>({...f,messageId:e.target.value}))}>
               <option value="">Selecione uma mensagem...</option>
-              {messages.map(m => <option key={m.id} value={m.id}>{m.conteudo.substring(0,20)} ({m.canal})</option>)}
+              {messages.map(m => <option key={m.id} value={m.id}>{m.nome || m.name || m.conteudo?.substring(0,30)} ({m.canal})</option>)}
             </select>
           </Field>
           <Field label="Data e hora de envio *">
@@ -717,14 +719,31 @@ function Webhooks({ accountId }) {
                     <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
                       <span style={{ fontSize:15, fontWeight:600, color:O.black }}>{wh.nome}</span>
                       <span style={{ ...S.tag, background: wh.active ? O.greenPale : O.gray100, color: wh.active ? "#166534" : O.gray500 }}>{wh.active ? "Ativo" : "Inativo"}</span>
-                      {wh.tipo === 'macro' && <span style={{ ...S.tag, background: "#DBEAFE", color: "#1D4ED8" }}>Macro</span>}
+                      {wh.tipo === 'macro' && <span style={{ ...S.tag, background: "#DBEAFE", color: "#1D4ED8" }}>Macro ({wh.messages?.length || 0} msgs)</span>}
                     </div>
                     {wh.descricao && <div style={{ fontSize:13, color:O.gray500, marginBottom:8 }}>{wh.descricao}</div>}
                     <div style={{ fontSize:12, color:O.gray500, marginBottom:4 }}>URL para configurar no Chatwoot/WhatTicket:</div>
-                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                      <code style={{ fontSize:11, background:O.gray50, padding:"6px 12px", borderRadius:8, color:O.black, flex:1, wordBreak:"break-all" }}>{baseUrl}/{accountId}/{wh.token}</code>
-                      <button style={S.btnGhost} onClick={()=>{navigator.clipboard?.writeText(`${baseUrl}/${accountId}/${wh.token}`);alert("URL copiada!");}}>Copiar</button>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom: 8 }}>
+                      <code style={{ fontSize:11, background:O.gray50, padding:"6px 12px", borderRadius:8, color:O.black, flex:1, wordBreak:"break-all" }}>
+                        {wh.tipo === 'macro'
+                          ? `${macroUrl}/${accountId}/${wh.token}`
+                          : `${baseUrl}/${accountId}/${wh.token}`
+                        }
+                      </code>
+                      <button style={S.btnGhost} onClick={()=>{
+                        const url = wh.tipo === 'macro'
+                          ? `${macroUrl}/${accountId}/${wh.token}`
+                          : `${baseUrl}/${accountId}/${wh.token}`;
+                        navigator.clipboard?.writeText(url);
+                        alert("URL copiada!");
+                      }}>Copiar</button>
                     </div>
+                    {wh.tipo === 'macro' && (
+                      <div style={{ fontSize:11, color: "#6B7280", padding:"8px 12px", background:"#F9FAFB", borderRadius:8, borderLeft:`3px solid ${O.orange}`, lineHeight:1.7 }}>
+                        <b>ℹ Macro Chatwoot:</b> Configure esta URL na macro do Chatwoot como uma ação de webhook HTTP POST. O sistema irá cadastrar o cliente e criar os agendamentos automaticamente.<br/>
+                        <span style={{ color: O.orange }}>Variáveis nas mensagens:</span> <code style={{ background:"#FFE8D0", color:O.orange, padding:"1px 4px", borderRadius:3 }}>{`{{nome}}`}</code> <code style={{ background:"#FFE8D0", color:O.orange, padding:"1px 4px", borderRadius:3 }}>{`{{telefone}}`}</code> <code style={{ background:"#FFE8D0", color:O.orange, padding:"1px 4px", borderRadius:3 }}>{`{{conversation_id}}`}</code> <code style={{ background:"#FFE8D0", color:O.orange, padding:"1px 4px", borderRadius:3 }}>{`{{conta}}`}</code> <code style={{ background:"#FFE8D0", color:O.orange, padding:"1px 4px", borderRadius:3 }}>{`{{data}}`}</code>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
