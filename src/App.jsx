@@ -519,6 +519,9 @@ function Schedules({ accountId }) {
   const [editId, setEditId] = useState(null);
   const blank = { clientId:"", messageId:"", scheduledAt:"", notes:"", repeat:"none" };
   const [form, setForm] = useState(blank);
+  // Estado para o modal de edição de agendamento
+  const [editSchedule, setEditSchedule] = useState(null); // { id, clientName, messageName, scheduledAt, mensagem }
+  const [editForm, setEditForm] = useState({ scheduledAt:"", mensagem:"" });
 
   useEffect(() => { loadAll(); }, [accountId]);
 
@@ -550,6 +553,27 @@ function Schedules({ accountId }) {
 
   function openNew()  { setForm(blank); setEditId(null); setShow(true); }
   function openEdit(s){ setForm(s); setEditId(s.id); setShow(true); }
+
+  // Funções para editar um agendamento já criado (data e/ou mensagem)
+  function openEditSchedule(s) {
+    setEditSchedule(s);
+    setEditForm({
+      scheduledAt: s.scheduledAt ? s.scheduledAt.slice(0, 16) : "",
+      mensagem: s.messageName || ""
+    });
+  }
+
+  async function saveEditSchedule() {
+    if (!editForm.scheduledAt && !editForm.mensagem.trim()) return;
+    try {
+      await apiFetch(accountId, `/schedules/${editSchedule.id}`, "PUT", {
+        mensagem: editForm.mensagem.trim() || undefined,
+        agendado_para: editForm.scheduledAt || undefined
+      });
+      setEditSchedule(null);
+      loadAll();
+    } catch(e) { alert("Erro ao salvar edição: " + e.message); }
+  }
 
   async function save() {
     if (!form.clientId || !form.messageId || !form.scheduledAt) return;
@@ -610,6 +634,9 @@ function Schedules({ accountId }) {
                 </div>
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                   <StatusTag status={s.status} />
+                  {s.status === "pending" && (
+                    <button style={{ ...S.btnGhost, padding:"6px 12px", fontSize:12 }} onClick={()=>openEditSchedule(s)}>✏ Editar</button>
+                  )}
                   <button style={{ ...S.btnGhost, color:O.red, borderColor:"#FECACA", padding:"6px 10px" }} onClick={()=>remove(s.id)}>✕</button>
                 </div>
               </div>
@@ -635,6 +662,43 @@ function Schedules({ accountId }) {
             <input type="datetime-local" style={S.input} value={form.scheduledAt?.slice(0,16)||""} onChange={e=>setForm(f=>({...f,scheduledAt:e.target.value}))} />
           </Field>
           <Actions onCancel={()=>setShow(false)} onSave={save} />
+        </Modal>
+      )}
+
+      {/* Modal de edição de agendamento existente (apenas pendentes) */}
+      {editSchedule && (
+        <Modal title="Editar agendamento pendente" onClose={()=>setEditSchedule(null)}>
+          <div style={{ padding:"10px 14px", background:O.orangePale, borderRadius:10, marginBottom:16, fontSize:13, color:O.gray700 }}>
+            <b>Cliente:</b> {editSchedule.clientName}
+          </div>
+
+          <Field label="Nova data e hora de envio">
+            <input
+              type="datetime-local"
+              id="edit-schedule-datetime"
+              style={S.input}
+              value={editForm.scheduledAt}
+              onChange={e=>setEditForm(f=>({...f,scheduledAt:e.target.value}))}
+            />
+            <div style={{ fontSize:11, color:O.gray400, marginTop:4 }}>Data/hora atual: <b>{fmt(editSchedule.scheduledAt)}</b></div>
+          </Field>
+
+          <Field label="Conteúdo da mensagem">
+            <textarea
+              id="edit-schedule-message"
+              style={{ ...S.input, minHeight:120, resize:"vertical" }}
+              value={editForm.mensagem}
+              onChange={e=>setEditForm(f=>({...f,mensagem:e.target.value}))}
+              placeholder="Edite o texto da mensagem que será enviada..."
+            />
+            <div style={{ fontSize:11, color:O.gray400, marginTop:4 }}>Deixe em branco para manter o conteúdo atual.</div>
+          </Field>
+
+          <div style={{ padding:"10px 14px", background:O.bluePale, borderRadius:10, marginBottom:8, fontSize:12, color:"#1E40AF" }}>
+            ⚠ Apenas agendamentos com status <b>Pendente</b> podem ser editados.
+          </div>
+
+          <Actions onCancel={()=>setEditSchedule(null)} onSave={saveEditSchedule} saveLabel="Salvar alterações" />
         </Modal>
       )}
     </div>

@@ -91,6 +91,21 @@ app.post('/api/:conta/schedules', async (req, res) => {
   }
 })
 
+app.put('/api/:conta/schedules/:id', async (req, res) => {
+  try {
+    const { mensagem, agendado_para } = req.body
+    const { rows } = await pool.query(
+      `UPDATE agendamentos SET mensagem=COALESCE($1, mensagem), agendado_para=COALESCE($2, agendado_para)
+       WHERE id=$3 AND conta_slug=$4 AND status='pending' RETURNING *`,
+      [mensagem || null, agendado_para || null, req.params.id, req.params.conta]
+    )
+    if (!rows.length) return res.status(404).json({ error: 'Agendamento não encontrado ou não é pendente' })
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.delete('/api/:conta/schedules/:id', async (req, res) => {
   try {
     await pool.query('DELETE FROM agendamentos WHERE id=$1 AND conta_slug=$2', [req.params.id, req.params.conta])
@@ -352,7 +367,7 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
       || {}
     const customAttr = contact.custom_attributes || {}
     const inbox = conversation.inbox_id || payload.inbox_id || null
-    
+
     const nome = contact.name || contact.display_name || payload.sender?.name || 'Sem nome'
     const phone = (
       contact.phone_number ||
