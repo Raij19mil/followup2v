@@ -381,8 +381,8 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
     const email = contact.email || customAttr.email || payload.meta?.sender?.email || ''
     const chatwootId = contact.id || payload.sender?.id || null
     const conversationId = conversation.id || payload.conversation_id || payload.id || null
-
-    console.log(`[MACRO] conta=${conta} nome=${nome} phone=${phone} email=${email} convId=${conversationId}`)
+    const accountId = payload.account?.id || conversation.account_id || null
+    console.log(`[MACRO] conta=${conta} nome=${nome} phone=${phone} email=${email} convId=${conversationId} accId=${accountId}`)
 
     if (!phone && !email && !conversationId) {
       // Salvar log mesmo sem dados de contato/conversa
@@ -461,9 +461,9 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
 
       const agId = createId()
       await pool.query(
-        `INSERT INTO agendamentos (id, conta_slug, cliente_id, mensagem, canal, agendado_para, status)
-         VALUES ($1,$2,$3,$4,$5,$6,'pending')`,
-        [agId, conta, clienteId, conteudo, link.canal, dataEnvio.toISOString()]
+        `INSERT INTO agendamentos (id, conta_slug, cliente_id, mensagem, canal, agendado_para, status, chatwoot_account_id, chatwoot_conversation_id)
+         VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8)`,
+        [agId, conta, clienteId, conteudo, link.canal, dataEnvio.toISOString(), accountId, conversationId]
       )
       agendamentosCriados.push({ id: agId, dias_offset: link.dias_offset, msg: link.msg_nome })
       console.log(`[MACRO] Agendamento criado: ${agId} para ${cli.nome} em ${dataStr} ${horaStr}`)
@@ -544,6 +544,16 @@ app.get('/api/:conta/chatwoot/contacts', async (req, res) => {
 
 app.get('/api/health', (_, res) => res.json({ ok: true, ts: new Date().toISOString() }))
 
+async function ensureColumnsExist() {
+  try {
+    await pool.query(`ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS chatwoot_account_id VARCHAR(255)`);
+    await pool.query(`ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS chatwoot_conversation_id VARCHAR(255)`);
+    console.log('[DB] Colunas chatwoot_account_id e chatwoot_conversation_id verificadas/adicionadas');
+  } catch (e) {
+    console.error('[DB] Erro ao verificar colunas:', e.message);
+  }
+}
+
 // ─── CRON: ENVIAR MENSAGENS AGENDADAS VIA CHATWOOT ───────────────────────────
 
 async function processScheduledMessages() {
@@ -551,7 +561,7 @@ async function processScheduledMessages() {
     // Buscar agendamentos pendentes cuja data já passou
     const { rows: pendentes } = await pool.query(
       `SELECT a.*, c.nome as cliente_nome, c.phone as cliente_phone, c.email as cliente_email,
-              c.chatwoot_conversation_id, c.conta_slug
+              c.chatwoot_conversation_id as cliente_conversation_id, c.conta_slug
        FROM agendamentos a
        JOIN clientes c ON c.id = a.cliente_id
        WHERE a.status='pending' AND a.agendado_para <= NOW()
@@ -575,7 +585,11 @@ async function processScheduledMessages() {
     for (const ag of pendentes) {
       const integ = integMap[ag.conta_slug]
 
-      // Se não tem integração ou conversation_id, marcar como falha
+      // Definir os IDs de conversa e conta, priorizando os salvos no agendamento, com fallback para cliente/integração
+      const conversationId = ag.chatwoot_conversation_id || ag.cliente_conversation_id
+      const accountId = ag.chatwoot_account_id || integ?.chatwoot_account_id || '1'
+
+      // Se não tem integração configurada
       if (!integ?.chatwoot_url || !integ?.chatwoot_token) {
         await pool.query(
           `UPDATE agendamentos SET status='failed', erro='Integração Chatwoot não configurada', enviado_em=NOW() WHERE id=$1`,
@@ -584,9 +598,10 @@ async function processScheduledMessages() {
         continue
       }
 
-      if (!ag.chatwoot_conversation_id) {
+      // Se não tem conversation_id
+      if (!conversationId) {
         await pool.query(
-          `UPDATE agendamentos SET status='failed', erro='Cliente sem conversation_id do Chatwoot', enviado_em=NOW() WHERE id=$1`,
+          `UPDATE agendamentos SET status='failed', erro='Sem conversation_id do Chatwoot', enviado_em=NOW() WHERE id=$1`,
           [ag.id]
         )
         continue
@@ -594,9 +609,8 @@ async function processScheduledMessages() {
 
       // Enviar mensagem via Chatwoot API
       try {
-        const accId = integ.chatwoot_account_id || '1'
         const cwUrl = integ.chatwoot_url.replace(/\/$/, '')
-        const url = `${cwUrl}/api/v1/accounts/${accId}/conversations/${ag.chatwoot_conversation_id}/messages`
+        const url = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`
 
         const response = await fetch(url, {
           method: 'POST',
@@ -615,7 +629,7 @@ async function processScheduledMessages() {
             `UPDATE agendamentos SET status='sent', enviado_em=NOW() WHERE id=$1`,
             [ag.id]
           )
-          console.log(`[CRON] Mensagem enviada: agendamento ${ag.id} → conversa ${ag.chatwoot_conversation_id}`)
+          console.log(`[CRON] Mensagem enviada: agendamento ${ag.id} → conta ${accountId} / conversa ${conversationId}`)
         } else {
           const errText = await response.text().catch(() => '')
           await pool.query(
@@ -643,7 +657,8 @@ setInterval(processScheduledMessages, 60_000)
 // ─── START ────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3001
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
+  await ensureColumnsExist()
   console.log(`Server running on :${PORT}`)
   console.log('[CRON] Processador de mensagens agendadas ativo (intervalo: 60s)')
   // Executar uma vez ao iniciar
