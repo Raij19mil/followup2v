@@ -601,6 +601,19 @@ function Schedules({ accountId }) {
     }
   }
 
+  async function sendManually(id) {
+    if (confirm("Deseja enviar esta mensagem manualmente agora?")) {
+      try {
+        await apiFetch(accountId, `/schedules/${id}/send`, "POST");
+        alert("Mensagem enviada com sucesso!");
+        loadAll();
+      } catch(e) {
+        alert("Erro ao enviar manualmente: " + e.message);
+        loadAll();
+      }
+    }
+  }
+
   return (
     <div>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24 }}>
@@ -635,7 +648,10 @@ function Schedules({ accountId }) {
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                   <StatusTag status={s.status} />
                   {s.status === "pending" && (
-                    <button style={{ ...S.btnGhost, padding:"6px 12px", fontSize:12 }} onClick={()=>openEditSchedule(s)}>✏ Editar</button>
+                    <>
+                      <button style={{ ...S.btnGhost, padding:"6px 12px", fontSize:12, color:O.blue, borderColor:"#BFDBFE" }} onClick={()=>sendManually(s.id)}>✉ Enviar agora</button>
+                      <button style={{ ...S.btnGhost, padding:"6px 12px", fontSize:12 }} onClick={()=>openEditSchedule(s)}>✏ Editar</button>
+                    </>
                   )}
                   <button style={{ ...S.btnGhost, color:O.red, borderColor:"#FECACA", padding:"6px 10px" }} onClick={()=>remove(s.id)}>✕</button>
                 </div>

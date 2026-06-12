@@ -620,7 +620,8 @@ async function processScheduledMessages() {
           },
           body: JSON.stringify({
             content: ag.mensagem,
-            message_type: 'outgoing'
+            message_type: 'outgoing',
+            private: false
           })
         })
 
@@ -650,6 +651,78 @@ async function processScheduledMessages() {
     console.error('[CRON] Erro geral no processamento:', e.message)
   }
 }
+
+// ─── ENVIAR MENSAGEM MANUALMENTE ──────────────────────────────────────────────
+
+app.post('/api/:conta/schedules/:id/send', async (req, res) => {
+  try {
+    const { id, conta } = req.params;
+    const { rows: agendamentos } = await pool.query(
+      `SELECT a.*, c.nome as cliente_nome, c.phone as cliente_phone, c.email as cliente_email,
+              c.chatwoot_conversation_id as cliente_conversation_id, c.conta_slug
+       FROM agendamentos a
+       JOIN clientes c ON c.id = a.cliente_id
+       WHERE a.id=$1 AND a.conta_slug=$2`,
+      [id, conta]
+    );
+
+    if (!agendamentos.length) {
+      return res.status(404).json({ error: 'Agendamento não encontrado' });
+    }
+
+    const ag = agendamentos[0];
+
+    const { rows: integracoes } = await pool.query(
+      'SELECT chatwoot_url, chatwoot_token, chatwoot_account_id FROM integracoes WHERE conta_slug=$1',
+      [conta]
+    );
+    const integ = integracoes[0];
+
+    const conversationId = ag.chatwoot_conversation_id || ag.cliente_conversation_id;
+    const accountId = ag.chatwoot_account_id || integ?.chatwoot_account_id || '1';
+
+    if (!integ?.chatwoot_url || !integ?.chatwoot_token) {
+      return res.status(400).json({ error: 'Integração Chatwoot não configurada' });
+    }
+
+    if (!conversationId) {
+      return res.status(400).json({ error: 'Sem conversation_id do Chatwoot' });
+    }
+
+    const cwUrl = integ.chatwoot_url.replace(/\/$/, '');
+    const url = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'api_access_token': integ.chatwoot_token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        content: ag.mensagem,
+        message_type: 'outgoing',
+        private: false
+      })
+    });
+
+    if (response.ok) {
+      await pool.query(
+        `UPDATE agendamentos SET status='sent', enviado_em=NOW() WHERE id=$1`,
+        [ag.id]
+      );
+      res.json({ ok: true, message: 'Mensagem enviada com sucesso' });
+    } else {
+      const errText = await response.text().catch(() => '');
+      await pool.query(
+        `UPDATE agendamentos SET status='failed', erro=$2, enviado_em=NOW() WHERE id=$1`,
+        [ag.id, `HTTP ${response.status}: ${errText.slice(0, 200)}`]
+      );
+      res.status(400).json({ error: `Falha ao enviar: HTTP ${response.status} ${errText}` });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Executar cron a cada 60 segundos
 setInterval(processScheduledMessages, 60_000)
