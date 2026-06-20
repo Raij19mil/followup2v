@@ -734,6 +734,7 @@ function Webhooks({ accountId }) {
 
   const baseUrl = `${API}/webhook`;
   const macroUrl = `${API}/webhook-macro`;
+  const cancelUrl = `${API}/webhook-cancel`;
 
   useEffect(() => { load(); }, [accountId]);
 
@@ -761,7 +762,7 @@ function Webhooks({ accountId }) {
         tipo: form.tipo
       });
 
-      if (form.tipo === "macro" && form.msgLinks.length > 0) {
+      if ((form.tipo === "macro" || form.tipo === "evento") && form.msgLinks.length > 0) {
         for (const link of form.msgLinks) {
           if (link.msgId) {
             await apiFetch(accountId, `/webhooks/${whRes.id}/messages`, "POST", {
@@ -788,7 +789,7 @@ function Webhooks({ accountId }) {
       </div>
 
       <div style={{ padding: "14px 16px", background: O.bluePale, borderRadius: 12, marginBottom: 20, fontSize: 13, color: "#1E40AF" }}>
-        <b>Como funciona:</b> Cada webhook gera uma URL única. Configure-a no Chatwoot ou WhatTicket para que, ao criar um contato ou conversa, o cliente seja cadastrado aqui automaticamente — e um follow-up agendado, se quiser.
+        <b>Como funciona:</b> Cada webhook gera uma URL única. Configure-a no Chatwoot ou WhatTicket para que, ao criar um contato, criar conversa ou atualizar status, o sistema gerencie seus agendamentos automaticamente.
       </div>
 
       {webhooks.length === 0
@@ -802,6 +803,8 @@ function Webhooks({ accountId }) {
                     <span style={{ fontSize: 15, fontWeight: 600, color: O.black }}>{wh.nome}</span>
                     <span style={{ ...S.tag, background: wh.active ? O.greenPale : O.gray100, color: wh.active ? "#166534" : O.gray500 }}>{wh.active ? "Ativo" : "Inativo"}</span>
                     {wh.tipo === 'macro' && <span style={{ ...S.tag, background: "#DBEAFE", color: "#1D4ED8" }}>Macro ({wh.messages?.length || 0} msgs)</span>}
+                    {wh.tipo === 'evento' && <span style={{ ...S.tag, background: "#FFE4E6", color: "#BE123C" }}>Evento ({wh.messages?.length || 0} msgs)</span>}
+                    {wh.tipo === 'cancelar' && <span style={{ ...S.tag, background: "#F3F4F6", color: "#374151" }}>Cancelar Agendamentos</span>}
                   </div>
                   {wh.descricao && <div style={{ fontSize: 13, color: O.gray500, marginBottom: 8 }}>{wh.descricao}</div>}
                   <div style={{ fontSize: 12, color: O.gray500, marginBottom: 4 }}>URL para configurar no Chatwoot/WhatTicket:</div>
@@ -809,21 +812,51 @@ function Webhooks({ accountId }) {
                     <code style={{ fontSize: 11, background: O.gray50, padding: "6px 12px", borderRadius: 8, color: O.black, flex: 1, wordBreak: "break-all" }}>
                       {wh.tipo === 'macro'
                         ? `${macroUrl}/${accountId}/${wh.token}`
+                        : wh.tipo === 'cancelar'
+                        ? `${cancelUrl}/${accountId}/${wh.token}`
                         : `${baseUrl}/${accountId}/${wh.token}`
                       }
                     </code>
                     <button style={S.btnGhost} onClick={() => {
                       const url = wh.tipo === 'macro'
                         ? `${macroUrl}/${accountId}/${wh.token}`
+                        : wh.tipo === 'cancelar'
+                        ? `${cancelUrl}/${accountId}/${wh.token}`
                         : `${baseUrl}/${accountId}/${wh.token}`;
                       navigator.clipboard?.writeText(url);
                       alert("URL copiada!");
                     }}>Copiar</button>
                   </div>
                   {wh.tipo === 'macro' && (
-                    <div style={{ fontSize: 11, color: "#6B7280", padding: "8px 12px", background: "#F9FAFB", borderRadius: 8, borderLeft: `3px solid ${O.orange}`, lineHeight: 1.7 }}>
+                    <div style={{ fontSize: 11, color: "#6B7280", padding: "8px 12px", background: "#F9FAFB", borderRadius: 8, borderLeft: `3px solid ${O.orange}`, lineHeight: 1.7, marginBottom: 10 }}>
                       <b>ℹ Macro Chatwoot:</b> Configure esta URL na macro do Chatwoot como uma ação de webhook HTTP POST. O sistema irá cadastrar o cliente e criar os agendamentos automaticamente.<br />
                       <span style={{ color: O.orange }}>Variáveis nas mensagens:</span> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{nome}}`}</code> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{telefone}}`}</code> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{conversation_id}}`}</code> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{conta}}`}</code> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{data}}`}</code>
+                    </div>
+                  )}
+                  {wh.tipo === 'evento' && (
+                    <div style={{ fontSize: 11, color: "#6B7280", padding: "8px 12px", background: "#F9FAFB", borderRadius: 8, borderLeft: `3px solid ${O.orange}`, lineHeight: 1.7, marginBottom: 10 }}>
+                      <b>ℹ Webhook de Evento:</b> Configure esta URL no Chatwoot como um webhook de <i>Contact Created</i> ou <i>Conversation Created</i>. O sistema irá cadastrar o cliente e criar os agendamentos automaticamente.<br />
+                      <span style={{ color: O.orange }}>Variáveis nas mensagens:</span> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{nome}}`}</code> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{telefone}}`}</code> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{conversation_id}}`}</code> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{conta}}`}</code> <code style={{ background: "#FFE8D0", color: O.orange, padding: "1px 4px", borderRadius: 3 }}>{`{{data}}`}</code>
+                    </div>
+                  )}
+                  {wh.tipo === 'cancelar' && (
+                    <div style={{ fontSize: 11, color: "#6B7280", padding: "8px 12px", background: "#F9FAFB", borderRadius: 8, borderLeft: `3px solid ${O.red}`, lineHeight: 1.7 }}>
+                      <b>ℹ Cancelador de Agendamentos:</b> Configure esta URL no Chatwoot como webhook (ex: evento <i>Conversation Updated</i> ou <i>Conversation Resolved</i>). Quando ativado, cancelará todos os agendamentos pendentes do contato ou conversa.
+                    </div>
+                  )}
+                  {wh.messages && wh.messages.length > 0 && (
+                    <div style={{ marginTop: 12, padding: "10px 14px", background: O.gray50, borderRadius: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: O.black, marginBottom: 6 }}>Mensagens Agendadas:</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {wh.messages.map(m => (
+                          <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                            <span style={{ ...S.tag, background: O.orangePale, color: O.orange, fontSize: 10, padding: "2px 6px" }}>+{m.dias_offset} dia{m.dias_offset !== 1 ? "s" : ""}</span>
+                            <span style={{ color: O.gray700, fontWeight: 500 }}>{m.mensagem_nome}</span>
+                            <span style={{ color: O.gray400 }}>·</span>
+                            <span style={{ color: O.gray500, fontSize: 11 }}>{m.canal}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -856,35 +889,19 @@ function Webhooks({ accountId }) {
         <Modal title="Criar webhook" onClose={() => setShow(false)}>
           <Field label="Tipo de Webhook">
             <select style={S.input} value={form.tipo} onChange={e => setForm(f => ({ ...f, tipo: e.target.value }))}>
-              <option value="evento">Evento Padrão (contact_created)</option>
+              <option value="evento">Evento Padrão (contact_created/conversation_created)</option>
               <option value="macro">Macro do Chatwoot (macro_executed)</option>
+              <option value="cancelar">Cancelar Agendamentos (conversation_resolved/updated)</option>
             </select>
           </Field>
           <Field label="Nome do webhook *">
-            <input style={S.input} value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder={form.tipo === 'macro' ? "Ex: Macro - Boas vindas" : "Ex: Chatwoot — Novos contatos"} />
+            <input style={S.input} value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder={form.tipo === 'macro' ? "Ex: Macro - Boas vindas" : form.tipo === 'cancelar' ? "Ex: Cancelar agendamentos pendentes" : "Ex: Chatwoot — Novos contatos"} />
           </Field>
           <Field label="Descrição">
             <input style={S.input} value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} placeholder="Para que serve este webhook?" />
           </Field>
 
-          {form.tipo === 'evento' && (
-            <div style={{ padding: 14, background: O.orangePale, borderRadius: 10, marginBottom: 14 }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-                <input type="checkbox" checked={form.autoSchedule} onChange={e => setForm(f => ({ ...f, autoSchedule: e.target.checked }))} />
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: O.black }}>Criar agendamento automático</div>
-                  <div style={{ fontSize: 12, color: O.gray700 }}>Quando o cliente chegar, agenda follow-up automaticamente</div>
-                </div>
-              </label>
-            </div>
-          )}
-          {form.tipo === 'evento' && form.autoSchedule && (
-            <Field label="Agendar após quantos dias?">
-              <input type="number" min={0} style={{ ...S.input, width: 100 }} value={form.scheduleDays} onChange={e => setForm(f => ({ ...f, scheduleDays: parseInt(e.target.value) || 1 }))} />
-            </Field>
-          )}
-
-          {form.tipo === 'macro' && (
+          {(form.tipo === 'macro' || form.tipo === 'evento') && (
             <div style={{ padding: 14, background: O.bluePale, borderRadius: 10, marginBottom: 14 }}>
               <h4 style={{ fontSize: 13, margin: "0 0 10px", color: O.black }}>Mensagens a enviar (Agendamento Automático)</h4>
               {form.msgLinks.map((link, idx) => (

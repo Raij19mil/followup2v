@@ -170,11 +170,24 @@ app.delete('/api/:conta/messages/:id', async (req, res) => {
 
 app.get('/api/:conta/webhooks', async (req, res) => {
   try {
-    const { rows } = await pool.query(
+    const { rows: webhooks } = await pool.query(
       'SELECT * FROM webhooks WHERE conta_slug=$1 ORDER BY criado_em DESC',
       [req.params.conta]
     )
-    res.json(rows)
+
+    for (const wh of webhooks) {
+      const { rows: messages } = await pool.query(
+        `SELECT wm.*, m.nome as mensagem_nome, m.conteudo, m.canal
+         FROM webhook_mensagens wm
+         JOIN mensagens m ON m.id = wm.mensagem_id
+         WHERE wm.conta_slug=$1 AND wm.webhook_id=$2
+         ORDER BY wm.dias_offset ASC`,
+        [req.params.conta, wh.id]
+      )
+      wh.messages = messages
+    }
+
+    res.json(webhooks)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -268,6 +281,88 @@ app.post('/webhook-debug/:conta', (req, res) => {
   })
 })
 
+// Helper to extract contact and conversation details from various payload structures
+function extractContactAndConversation(payload) {
+  const conversation = payload.conversation || (payload.event === 'conversation_created' || payload.event === 'conversation_status_changed' || payload.event === 'message_created' ? payload : null) || {}
+  const contact = payload.contact 
+    || conversation.meta?.sender
+    || conversation.contact
+    || payload.sender
+    || {}
+  const customAttr = contact.custom_attributes || {}
+
+  const nome = contact.name || contact.display_name || payload.sender?.name || 'Sem nome'
+  const phone = (
+    contact.phone_number ||
+    contact.phone ||
+    customAttr.phone_number ||
+    customAttr.telefone ||
+    customAttr.phone ||
+    payload.meta?.sender?.phone_number ||
+    ''
+  )
+  const email = contact.email || customAttr.email || payload.meta?.sender?.email || ''
+  const chatwootId = contact.id || payload.sender?.id || null
+  const conversationId = conversation.id || payload.conversationId || payload.conversation_id || null
+  const accountId = payload.account?.id || conversation.account_id || null
+
+  return { nome, phone, email, chatwootId, conversationId, accountId }
+}
+
+// Helper to schedule all messages linked to a webhook for a given client
+async function scheduleWebhookMessages(conta, webhook, clienteId, nome, phone, email, conversationId, accountId) {
+  const agendamentosCriados = []
+  
+  // Buscar mensagens vinculadas ao webhook
+  const { rows: links } = await pool.query(
+    `SELECT wm.*, m.conteudo, m.canal, m.nome as msg_nome
+     FROM webhook_mensagens wm
+     JOIN mensagens m ON m.id = wm.mensagem_id
+     WHERE wm.webhook_id=$1 AND wm.conta_slug=$2
+     ORDER BY wm.dias_offset ASC`,
+    [webhook.id, conta]
+  )
+
+  if (links.length === 0) {
+    console.log(`[WEBHOOK] Nenhuma mensagem vinculada ao webhook ${webhook.id} (${webhook.nome}).`)
+    return agendamentosCriados
+  }
+
+  // Buscar dados atualizados do cliente para substituir variáveis
+  const { rows: cliRows } = await pool.query('SELECT * FROM clientes WHERE id=$1', [clienteId])
+  const cli = cliRows[0] || { nome, phone, email }
+
+  // Criar agendamentos para cada mensagem vinculada
+  for (const link of links) {
+    const dataEnvio = new Date()
+    dataEnvio.setDate(dataEnvio.getDate() + link.dias_offset)
+
+    const dataStr = dataEnvio.toLocaleDateString('pt-BR')
+    const horaStr = dataEnvio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+
+    // Substituir variáveis na mensagem (inclui {{conta}} e {{conversation_id}})
+    let conteudo = link.conteudo
+      .replace(/\{\{nome\}\}/g, cli.nome || nome || '')
+      .replace(/\{\{telefone\}\}/g, cli.phone || phone || '')
+      .replace(/\{\{email\}\}/g, cli.email || email || '')
+      .replace(/\{\{data\}\}/g, dataStr)
+      .replace(/\{\{hora\}\}/g, horaStr)
+      .replace(/\{\{conta\}\}/g, conta)
+      .replace(/\{\{conversation_id\}\}/g, String(conversationId || ''))
+
+    const agId = createId()
+    await pool.query(
+      `INSERT INTO agendamentos (id, conta_slug, cliente_id, mensagem, canal, agendado_para, status, chatwoot_account_id, chatwoot_conversation_id)
+       VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8)`,
+      [agId, conta, clienteId, conteudo, link.canal, dataEnvio.toISOString(), accountId, conversationId]
+    )
+    agendamentosCriados.push({ id: agId, dias_offset: link.dias_offset, msg: link.msg_nome })
+    console.log(`[WEBHOOK] Agendamento criado: ${agId} para ${cli.nome} em ${dataStr} ${horaStr}`)
+  }
+  
+  return agendamentosCriados
+}
+
 // ─── RECEBER WEBHOOK EXTERNO (Chatwoot / Evolution API) ───────────────────────
 
 app.post('/webhook/:conta/:token', async (req, res) => {
@@ -285,41 +380,47 @@ app.post('/webhook/:conta/:token', async (req, res) => {
     const webhook = wh[0]
     let action = 'Evento recebido'
     let clienteId = null
+    let agendamentos = []
 
-    // Processar evento contact_created do Chatwoot
+    // Processar evento contact_created ou conversation_created do Chatwoot
     if (payload.event === 'contact_created' || payload.event === 'conversation_created') {
-      const contact = payload.contact || {}
-      const nome = contact.name || 'Sem nome'
-      const phone = contact.phone_number || contact.phone || ''
-      const email = contact.email || ''
-      const chatwootId = contact.id || null
-      const conversationId = payload.conversationId || payload.conversation?.id || null
+      const { nome, phone, email, chatwootId, conversationId, accountId } = extractContactAndConversation(payload)
 
-      // Verificar se cliente já existe pelo telefone
-      const { rows: existing } = await pool.query(
-        'SELECT * FROM clientes WHERE conta_slug=$1 AND phone=$2',
-        [conta, phone]
-      )
+      // Buscar se cliente já existe
+      let existing = []
+      if (phone) {
+        existing = (await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND phone=$2', [conta, phone])).rows
+      } else if (email) {
+        existing = (await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND email=$2', [conta, email])).rows
+      } else if (conversationId) {
+        existing = (await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND chatwoot_conversation_id=$2', [conta, conversationId])).rows
+      }
 
       if (existing.length) {
         // Atualizar cliente existente
-        await pool.query(
-          `UPDATE clientes SET messages_received = messages_received + 1, last_webhook_at=NOW()
-           WHERE id=$1`,
-          [existing[0].id]
-        )
         clienteId = existing[0].id
+        await pool.query(
+          `UPDATE clientes SET messages_received = messages_received + 1, last_webhook_at=NOW(),
+           chatwoot_conversation_id=COALESCE($2, chatwoot_conversation_id)
+           WHERE id=$1`,
+          [clienteId, conversationId]
+        )
         action = `Cliente existente atualizado (${existing[0].messages_received + 1} mensagens recebidas)`
       } else {
         // Criar novo cliente
-        const newId = createId()
+        clienteId = createId()
         await pool.query(
           `INSERT INTO clientes (id, conta_slug, nome, phone, email, source, tags, notes, chatwoot_id, chatwoot_conversation_id, last_webhook_at)
            VALUES ($1,$2,$3,$4,$5,'webhook','{webhook}',$6,$7,$8,NOW())`,
-          [newId, conta, nome, phone, email, `Cadastrado automaticamente via webhook`, chatwootId, conversationId]
+          [clienteId, conta, nome, phone, email, `Cadastrado automaticamente via webhook`, chatwootId, conversationId]
         )
-        clienteId = newId
         action = 'Novo cliente cadastrado via webhook'
+      }
+
+      // Agendar mensagens se configurado
+      agendamentos = await scheduleWebhookMessages(conta, webhook, clienteId, nome, phone, email, conversationId, accountId)
+      if (agendamentos.length > 0) {
+        action += ` | ${agendamentos.length} agendamento(s) criado(s)`
       }
     }
 
@@ -330,7 +431,7 @@ app.post('/webhook/:conta/:token', async (req, res) => {
       [createId(), conta, webhook.id, webhook.nome, JSON.stringify(payload), action]
     )
 
-    res.json({ ok: true, action, clienteId })
+    res.json({ ok: true, action, clienteId, agendamentos })
   } catch (e) {
     console.error('Webhook error:', e)
     res.status(500).json({ error: e.message })
@@ -354,34 +455,9 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
     const webhook = wh[0]
     let action = 'Macro recebida'
     let clienteId = null
-    const agendamentosCriados = []
 
-    // Extrair dados do contato da conversa (payload de macro Chatwoot)
-    // O payload de macro do Chatwoot pode vir diretamente como o objeto da conversa,
-    // ou embrulhado. Tentamos todos os lugares conhecidos do schema do Chatwoot.
-    const conversation = payload.conversation || payload
-    const contact = conversation.meta?.sender
-      || conversation.contact
-      || payload.contact
-      || payload.sender
-      || {}
-    const customAttr = contact.custom_attributes || {}
-    const inbox = conversation.inbox_id || payload.inbox_id || null
-
-    const nome = contact.name || contact.display_name || payload.sender?.name || 'Sem nome'
-    const phone = (
-      contact.phone_number ||
-      contact.phone ||
-      customAttr.phone_number ||
-      customAttr.telefone ||
-      customAttr.phone ||
-      payload.meta?.sender?.phone_number ||
-      ''
-    )
-    const email = contact.email || customAttr.email || payload.meta?.sender?.email || ''
-    const chatwootId = contact.id || payload.sender?.id || null
-    const conversationId = conversation.id || payload.conversation_id || payload.id || null
-    const accountId = payload.account?.id || conversation.account_id || null
+    // Extrair dados usando helper flexível
+    const { nome, phone, email, chatwootId, conversationId, accountId } = extractContactAndConversation(payload)
     console.log(`[MACRO] conta=${conta} nome=${nome} phone=${phone} email=${email} convId=${conversationId} accId=${accountId}`)
 
     if (!phone && !email && !conversationId) {
@@ -423,52 +499,8 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
       action = 'Novo cliente cadastrado via macro'
     }
 
-    // Buscar mensagens vinculadas ao webhook
-    const { rows: links } = await pool.query(
-      `SELECT wm.*, m.conteudo, m.canal, m.nome as msg_nome
-       FROM webhook_mensagens wm
-       JOIN mensagens m ON m.id = wm.mensagem_id
-       WHERE wm.webhook_id=$1 AND wm.conta_slug=$2
-       ORDER BY wm.dias_offset ASC`,
-      [webhook.id, conta]
-    )
-
-    if (links.length === 0) {
-      console.warn(`[MACRO] Nenhuma mensagem vinculada ao webhook ${webhook.id} (${webhook.nome}). Configure mensagens na aba Webhooks.`)
-    }
-
-    // Buscar dados atualizados do cliente para substituir variáveis
-    const { rows: cliRows } = await pool.query('SELECT * FROM clientes WHERE id=$1', [clienteId])
-    const cli = cliRows[0] || { nome, phone, email }
-
-    // Criar agendamentos para cada mensagem vinculada
-    for (const link of links) {
-      const dataEnvio = new Date()
-      dataEnvio.setDate(dataEnvio.getDate() + link.dias_offset)
-
-      const dataStr = dataEnvio.toLocaleDateString('pt-BR')
-      const horaStr = dataEnvio.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-
-      // Substituir variáveis na mensagem (inclui {{conta}} e {{conversation_id}})
-      let conteudo = link.conteudo
-        .replace(/\{\{nome\}\}/g, cli.nome || nome || '')
-        .replace(/\{\{telefone\}\}/g, cli.phone || phone || '')
-        .replace(/\{\{email\}\}/g, cli.email || email || '')
-        .replace(/\{\{data\}\}/g, dataStr)
-        .replace(/\{\{hora\}\}/g, horaStr)
-        .replace(/\{\{conta\}\}/g, conta)
-        .replace(/\{\{conversation_id\}\}/g, String(conversationId || ''))
-
-      const agId = createId()
-      await pool.query(
-        `INSERT INTO agendamentos (id, conta_slug, cliente_id, mensagem, canal, agendado_para, status, chatwoot_account_id, chatwoot_conversation_id)
-         VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8)`,
-        [agId, conta, clienteId, conteudo, link.canal, dataEnvio.toISOString(), accountId, conversationId]
-      )
-      agendamentosCriados.push({ id: agId, dias_offset: link.dias_offset, msg: link.msg_nome })
-      console.log(`[MACRO] Agendamento criado: ${agId} para ${cli.nome} em ${dataStr} ${horaStr}`)
-    }
-
+    // Agendar mensagens
+    const agendamentosCriados = await scheduleWebhookMessages(conta, webhook, clienteId, nome, phone, email, conversationId, accountId)
     action += ` | ${agendamentosCriados.length} agendamento(s) criado(s)`
 
     // Salvar log
@@ -481,6 +513,84 @@ app.post('/webhook-macro/:conta/:token', async (req, res) => {
     res.json({ ok: true, action, clienteId, agendamentos: agendamentosCriados })
   } catch (e) {
     console.error('Webhook macro error:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── RECEBER WEBHOOK DE CANCELAMENTO ──────────────────────────────────────────
+
+app.post('/webhook-cancel/:conta/:token', async (req, res) => {
+  try {
+    const { conta, token } = req.params
+    const payload = req.body
+
+    // Verificar se o webhook de cancelamento existe e está ativo
+    const { rows: wh } = await pool.query(
+      `SELECT * FROM webhooks WHERE conta_slug=$1 AND token=$2 AND active=true AND tipo='cancelar'`,
+      [conta, token]
+    )
+    if (!wh.length) return res.status(404).json({ error: 'Webhook de cancelamento não encontrado ou inativo' })
+
+    const webhook = wh[0]
+    let action = 'Cancelamento processado'
+    
+    // Extrair informações do contato/conversa da mesma forma flexível
+    const { nome, phone, email, chatwootId, conversationId } = extractContactAndConversation(payload)
+    console.log(`[CANCEL] conta=${conta} nome=${nome} phone=${phone} email=${email} convId=${conversationId} chatwootId=${chatwootId}`)
+
+    // Procurar o cliente no banco
+    let client = null
+    if (phone) {
+      const { rows } = await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND phone=$2', [conta, phone])
+      if (rows.length) client = rows[0]
+    }
+    if (!client && email) {
+      const { rows } = await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND email=$2', [conta, email])
+      if (rows.length) client = rows[0]
+    }
+    if (!client && chatwootId) {
+      const { rows } = await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND chatwoot_id=$2', [conta, chatwootId])
+      if (rows.length) client = rows[0]
+    }
+    if (!client && conversationId) {
+      const { rows } = await pool.query('SELECT * FROM clientes WHERE conta_slug=$1 AND chatwoot_conversation_id=$2', [conta, conversationId])
+      if (rows.length) client = rows[0]
+    }
+
+    let query = `UPDATE agendamentos SET status='cancelled' WHERE conta_slug=$1 AND status='pending' AND (`
+    const params = [conta]
+    const conditions = []
+
+    if (client) {
+      params.push(client.id)
+      conditions.push(`cliente_id = $${params.length}`)
+    }
+    if (conversationId) {
+      params.push(String(conversationId))
+      conditions.push(`chatwoot_conversation_id = $${params.length}`)
+    }
+
+    let canceladosCount = 0
+
+    if (conditions.length > 0) {
+      query += conditions.join(' OR ') + ') RETURNING *'
+      const { rows: updated } = await pool.query(query, params)
+      canceladosCount = updated.length
+      action = `${canceladosCount} agendamento(s) pendente(s) cancelado(s) para o contato ${nome}`
+    } else {
+      action = 'Nenhum identificador válido (telefone, email, id de chatwoot ou conversa) encontrado no payload'
+    }
+
+    // Salvar log
+    await pool.query(
+      `INSERT INTO webhook_logs (id, conta_slug, webhook_id, webhook_name, payload, status, action)
+       VALUES ($1,$2,$3,$4,$5,'processed',$6)`,
+      [createId(), conta, webhook.id, webhook.nome, JSON.stringify(payload), 'processed', action]
+    )
+
+    res.json({ ok: true, action, canceladosCount })
+  } catch (e) {
+    console.error('Webhook cancel error:', e)
     res.status(500).json({ error: e.message })
   }
 })
